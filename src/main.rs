@@ -11,7 +11,7 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn(Camera3dBundle::default());
 }
 fn spawn_scene(mut commands: Commands) {
-    // Куб
+    // Cube
     commands.spawn(PbrBundle {
         mesh: Mesh::from(shape::Cube { size: 1.0 }),
         material: StandardMaterial {
@@ -22,7 +22,7 @@ fn spawn_scene(mut commands: Commands) {
         ..default()
     });
 
-    // Свет
+    // Light
     commands.spawn(PointLightBundle {
         transform: Transform::from_xyz(4.0, 8.0, 4.0),
         ..default()
