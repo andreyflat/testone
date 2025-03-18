@@ -31,6 +31,7 @@ fn main() {
                 rotate,
                 #[cfg(not(target_arch = "wasm32"))]
                 toggle_wireframe,
+                handle_exit,
             ),
         )
         .run();
@@ -186,5 +187,14 @@ fn toggle_wireframe(
 ) {
     if keyboard.just_pressed(KeyCode::Space) {
         wireframe_config.global = !wireframe_config.global;
+    }
+}
+
+fn handle_exit(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut app_exit_events: EventWriter<AppExit>,
+) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        app_exit_events.send(AppExit::Success);
     }
 }
