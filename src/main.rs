@@ -15,6 +15,7 @@ use bevy::{
         render_asset::RenderAssetUsages,
         render_resource::{Extent3d, TextureDimension, TextureFormat},
     },
+    ui::{Node, PositionType, Val},
 };
 
 fn main() {
@@ -24,11 +25,13 @@ fn main() {
             #[cfg(not(target_arch = "wasm32"))]
             WireframePlugin,
         ))
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, setup_fps_counter))
         .add_systems(
             Update,
             (
                 rotate,
+                rotate_camera,
+                update_fps_display,
                 #[cfg(not(target_arch = "wasm32"))]
                 toggle_wireframe,
                 handle_exit,
@@ -40,6 +43,9 @@ fn main() {
 /// A marker component for our shapes so we can query them separately from the ground plane
 #[derive(Component)]
 struct Shape;
+
+#[derive(Component)]
+struct FpsText;
 
 const SHAPES_X_EXTENT: f32 = 14.0;
 const EXTRUSION_X_EXTENT: f32 = 16.0;
@@ -114,12 +120,12 @@ fn setup(
     commands.spawn((
         PointLight {
             shadows_enabled: true,
-            intensity: 10_000_000.,
-            range: 100.0,
+            intensity: 5_000_000.,
+            range: 5000.0,
             shadow_depth_bias: 0.2,
             ..default()
         },
-        Transform::from_xyz(8.0, 16.0, 8.0),
+        Transform::from_xyz(8.0, 8.0, 8.0),
     ));
 
     // ground plane
@@ -145,9 +151,40 @@ fn setup(
     ));
 }
 
+fn setup_fps_counter(mut commands: Commands) {
+    commands.spawn((
+        Text::new("FPS: "),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(5.0),
+            right: Val::Px(5.0),
+            ..default()
+        },
+        FpsText,
+    ));
+}
+
+fn update_fps_display(
+    time: Res<Time>,
+    mut query: Query<&mut Text, With<FpsText>>,
+) {
+    let fps = 1.0 / time.delta_secs();
+    for mut text in &mut query {
+        text.0 = format!("FPS: {:.1}", fps);
+    }
+}
+
 fn rotate(mut query: Query<&mut Transform, With<Shape>>, time: Res<Time>) {
     for mut transform in &mut query {
         transform.rotate_y(time.delta_secs() / 2.);
+    }
+}
+
+fn rotate_camera(mut query: Query<&mut Transform, With<Camera3d>>, time: Res<Time>) {
+    for mut transform in &mut query {
+        let rotation = Quat::from_rotation_y(time.delta_secs() * 0.5);
+        transform.translation = rotation * transform.translation;
+        transform.look_at(Vec3::ZERO, Vec3::Y);
     }
 }
 
