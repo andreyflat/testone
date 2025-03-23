@@ -1,6 +1,10 @@
 //! A simple 3D scene with light shining over a cube sitting on a plane.
 
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    window::WindowMode,
+};
 
 // Константы для движения
 const MAX_SPEED: f32 = 4.0;
@@ -13,7 +17,17 @@ const MAX_AIR_SPEED: f32 = 16.0; // Максимальная скорость в
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                mode: WindowMode::Windowed,
+                ..default()
+            }),
+            ..default()
+        }))
+        .add_plugins((
+            LogDiagnosticsPlugin::default(),
+            FrameTimeDiagnosticsPlugin,
+        ))
         .add_systems(Startup, setup)
         .add_systems(Update, (
             player_movement,
@@ -22,37 +36,8 @@ fn main() {
             draw_cursor.after(update_position),
             follow_camera.after(update_position),
             check_exit,
-            fps_counter,
-            update_fps_display,
         ).chain())
         .run();
-}
-/// draw fps counter
-
-#[derive(Component)]
-struct FpsText;
-
-fn fps_counter(mut commands: Commands) {
-    commands.spawn((
-        Text::new("FPS: "),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(5.0),
-            right: Val::Px(5.0),
-           ..default()
-        },
-        FpsText,
-    ));
-}
-
-fn update_fps_display(
-   time: Res<Time>,
-   mut query: Query<&mut Text, With<FpsText>>,
-) {
-   let fps = 1.0 / time.delta_secs();
-   for mut text in &mut query {
-       text.0 = format!("FPS: {:.1}", fps);
-   }
 }
 
 #[derive(Component)]
