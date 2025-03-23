@@ -3,15 +3,16 @@
 use bevy::{
     prelude::*,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
-    window::WindowMode,
+    window::{WindowMode, PresentMode},
+    pbr::CascadeShadowConfig,
 };
 
 // Константы для движения
-const MAX_SPEED: f32 = 4.0;
-const ACCELERATE: f32 = 8.0;
-const AIR_ACCELERATE: f32 = 8.0;
+const MAX_SPEED: f32 = 8.0;
+const ACCELERATE: f32 = 16.0;
+const AIR_ACCELERATE: f32 = 16.0;
 const GRAVITY: f32 = -9.81;
-const JUMP_FORCE: f32 = 3.0;
+const JUMP_FORCE: f32 = 4.0;
 const MAX_JUMP_HEIGHT: f32 = 2.0; // Максимальная высота прыжка
 const MAX_AIR_SPEED: f32 = 16.0; // Максимальная скорость в воздухе
 
@@ -20,6 +21,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 mode: WindowMode::Windowed,
+                present_mode: PresentMode::AutoNoVsync,
                 ..default()
             }),
             ..default()
@@ -49,17 +51,59 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // ground plane
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(100., 100.))),
-        MeshMaterial3d(materials.add(Color::srgb(0.1, 0.1, 0.1))),
-        Ground,
-    ));
+    // Создаем материалы для шахматной доски
+    let dark_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.2, 0.2, 0.2),
+        perceptual_roughness: 0.9,
+        metallic: 0.0,
+        ..default()
+    });
+    
+    let light_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.8, 0.8, 0.8),
+        perceptual_roughness: 0.9,
+        metallic: 0.0,
+        ..default()
+    });
+
+    // Создаем шахматный паттерн из плоскостей
+    let tile_size = 2.0;
+    let board_size = 15; // Количество клеток в одну сторону
+    let plane_mesh = meshes.add(Plane3d::default().mesh().size(tile_size, tile_size));
+    
+    for x in -board_size..board_size {
+        for z in -board_size..board_size {
+            let position = Vec3::new(
+                x as f32 * tile_size,
+                0.0,
+                z as f32 * tile_size
+            );
+            
+            // Выбираем материал в зависимости от четности суммы координат
+            let material = if (x + z) % 2 == 0 {
+                dark_material.clone()
+            } else {
+                light_material.clone()
+            };
+            
+            commands.spawn((
+                Mesh3d(plane_mesh.clone()),
+                MeshMaterial3d(material),
+                Transform::from_translation(position),
+                Ground,
+            ));
+        }
+    }
     
     // cube
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(0.25, 1.0, 0.25))),
-        MeshMaterial3d(materials.add(Color::srgb_u8(124, 144, 255))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(124, 144, 255),
+            perceptual_roughness: 0.2,
+            metallic: 0.7,
+            ..default()
+        })),
         Transform::from_xyz(0.0, 0.5, 0.0),
         Cube,
         Jump::default(),
@@ -70,18 +114,29 @@ fn setup(
     
     // light
     commands.spawn((
-        DirectionalLight::default(),
-        Transform::from_translation(Vec3::ONE).looking_at(Vec3::ZERO, Vec3::Y),
+        DirectionalLight {
+            shadows_enabled: true,
+            illuminance: 10000.0,
+            shadow_depth_bias: 0.02,
+            shadow_normal_bias: 0.6,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        CascadeShadowConfig {
+            minimum_distance: 0.1,
+            bounds: vec![0.1, 5.0, 20.0, 100.0],
+            overlap_proportion: 0.2,
+        },
     ));
     
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(5.0, 5.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(8.0, 8.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         FollowCamera {
-            offset: Vec3::new(5.0, 5.0, 10.0), // Смещение камеры относительно куба
-            lerp_speed: 1.5, // Скорость следования за кубом
-            ignore_vertical: true, // Игнорировать вертикальное движение объекта
+            offset: Vec3::new(8.0, 8.0, 10.0),
+            lerp_speed: 2.0,
+            ignore_vertical: true,
         },
     ));
 }
@@ -102,7 +157,7 @@ impl Default for Jump {
         Self {
             is_jumping: false,
             can_jump: true,
-            jump_cooldown: 0.3, // Задержка между прыжками (в секундах)
+            jump_cooldown: 0.01, // Задержка между прыжками (в секундах)
             jump_timer: 0.0,
         }
     }
@@ -120,15 +175,41 @@ struct WishSpeed(f32);
 // Считываем ввод и обновляем желаемое направление движения
 fn player_movement(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<(&mut WishDirection, &mut WishSpeed, &mut Jump, &mut Velocity), With<Cube>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    ground: Query<&GlobalTransform, With<Ground>>,
+    windows: Query<&Window>,
+    mut query: Query<(&Transform, &mut WishDirection, &mut WishSpeed, &mut Jump, &mut Velocity), With<Cube>>,
 ) {
-    let (mut wishdir, mut wishspeed, mut jump, mut velocity) = query.single_mut();
+    let (cube_transform, mut wishdir, mut wishspeed, mut jump, mut velocity) = query.single_mut();
+    let (camera, camera_transform) = camera_query.single();
+    let ground_transform = ground.iter().next().unwrap();
 
     let mut direction = Vec3::ZERO;
 
-    if keyboard_input.pressed(KeyCode::KeyW) {
-        direction.z -= 1.0;
+    // Получаем позицию курсора и вычисляем точку пересечения с землей
+    if let Some(cursor_position) = windows.single().cursor_position() {
+        if let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_position) {
+            if let Some(distance) = ray.intersect_plane(
+                ground_transform.translation(),
+                InfinitePlane3d::new(ground_transform.up())
+            ) {
+                let cursor_world_position = ray.get_point(distance);
+                
+                // Если нажата клавиша W, двигаемся в направлении курсора
+                if keyboard_input.pressed(KeyCode::KeyW) {
+                    let target_position = Vec3::new(
+                        cursor_world_position.x,
+                        cube_transform.translation.y, // Сохраняем текущую высоту
+                        cursor_world_position.z
+                    );
+                    
+                    direction = (target_position - cube_transform.translation).normalize();
+                }
+            }
+        }
     }
+
+    // Добавляем стандартное управление для остальных клавиш
     if keyboard_input.pressed(KeyCode::KeyS) {
         direction.z += 1.0;
     }
@@ -144,14 +225,14 @@ fn player_movement(
     }
 
     wishdir.0 = direction;
-    wishspeed.0 = MAX_SPEED;
+    // Устанавливаем желаемую скорость в зависимости от состояния прыжка
+    wishspeed.0 = if jump.is_jumping { MAX_AIR_SPEED } else { MAX_SPEED };
     
-    // Прыжок - обработка только нажатия, таймер обрабатывается в update_position
+    // Обработка прыжка
     if keyboard_input.pressed(KeyCode::Space) && !jump.is_jumping && jump.can_jump {
         jump.is_jumping = true;
         jump.can_jump = false;
         jump.jump_timer = jump.jump_cooldown;
-        // Устанавливаем начальную скорость прыжка здесь
         velocity.0.y = JUMP_FORCE;
     }
 }
@@ -240,7 +321,7 @@ fn update_position(
     // Добавляем трение для горизонтального движения
     if velocity.0.length() > 0.01 {
         // Трение на земле сильнее, чем в воздухе
-        let friction = if jump.is_jumping { 0.98 } else { 0.90 };
+        let friction = if jump.is_jumping { 0.95 } else { 0.92 };
         velocity.0.x *= friction;
         velocity.0.z *= friction;
     } else {
@@ -251,12 +332,17 @@ fn update_position(
 
 fn draw_cursor(
     camera_query: Single<(&Camera, &GlobalTransform)>,
-    ground: Single<&GlobalTransform, With<Ground>>,
+    ground: Query<&GlobalTransform, With<Ground>>,
     windows: Single<&Window>,
     mut gizmos: Gizmos,
     mut cube_query: Query<(&mut Transform, &WishDirection), With<Cube>>,
 ) {
     let (camera, camera_transform) = *camera_query;
+    let ground_transform = if let Some(transform) = ground.iter().next() {
+        transform
+    } else {
+        return;
+    };
 
     let Some(cursor_position) = windows.cursor_position() else {
         return;
@@ -269,8 +355,8 @@ fn draw_cursor(
 
     // Вычисляем точку пересечения луча с плоскостью земли
     let Some(distance) = ray.intersect_plane(
-        ground.translation(),
-        InfinitePlane3d::new(ground.up())
+        ground_transform.translation(),
+        InfinitePlane3d::new(ground_transform.up())
     ) else {
         return;
     };
@@ -279,8 +365,8 @@ fn draw_cursor(
     // Рисуем круг чуть выше плоскости земли в этой позиции
     gizmos.circle(
         Isometry3d::new(
-            point + ground.up() * 0.01,
-            Quat::from_rotation_arc(Vec3::Z, ground.up().as_vec3()),
+            point + ground_transform.up() * 0.01,
+            Quat::from_rotation_arc(Vec3::Z, ground_transform.up().as_vec3()),
         ),
         0.2,
         Color::WHITE,
@@ -344,7 +430,6 @@ fn follow_camera(
         
         // Если нужно игнорировать вертикальное движение и куб в прыжке
         if follow.ignore_vertical && jump.is_jumping {
-            // Заменяем Y-координату на базовую высоту куба (0.5)
             target_cube_pos.y = 0.5;
         }
         
@@ -356,10 +441,24 @@ fn follow_camera(
             follow.lerp_speed * time.delta_secs()
         );
         
-        // Вычисляем целевой поворот (куб должен быть в центре вида камеры)
+        // Вычисляем направление от камеры к кубу только в горизонтальной плоскости
+        let horizontal_direction = (Vec3::new(
+            target_cube_pos.x - camera_transform.translation.x,
+            0.0,
+            target_cube_pos.z - camera_transform.translation.z
+        )).normalize();
+
+        // Создаем вектор направления с фиксированным углом наклона
+        let fixed_look = Vec3::new(
+            horizontal_direction.x,
+            -0.5,
+            horizontal_direction.z
+        ).normalize();
+        
+        // Создаем поворот от вектора вперед к направлению взгляда
         let target_rotation = Quat::from_rotation_arc(
-            (Vec3::NEG_Z).normalize(),
-            (target_cube_pos - camera_transform.translation).normalize()
+            Vec3::NEG_Z,
+            fixed_look
         );
         
         // Плавно поворачиваем камеру к целевой ориентации
