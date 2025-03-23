@@ -49,10 +49,11 @@ fn setup(
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(5.0, 5.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y),
         FollowCamera {
-            offset: Vec3::new(5.0, 5.0, 5.0), // Смещение камеры относительно куба
-            lerp_speed: 2.0, // Скорость следования за кубом
+            offset: Vec3::new(5.0, 5.0, 10.0), // Смещение камеры относительно куба
+            lerp_speed: 1.5, // Скорость следования за кубом
+            ignore_vertical: true, // Игнорировать вертикальное движение объекта
         },
     ));
 }
@@ -64,8 +65,9 @@ struct Cube;
 struct Jump {
     velocity: f32,
     is_jumping: bool,
-    max_jump_time: f32,
-    current_jump_time: f32,
+    can_jump: bool,
+    jump_cooldown: f32,
+    jump_timer: f32,
 }
 
 impl Default for Jump {
@@ -73,8 +75,9 @@ impl Default for Jump {
         Self {
             velocity: 0.0,
             is_jumping: false,
-            max_jump_time: 0.0, // Максимальное время удержания прыжка
-            current_jump_time: 0.0,
+            can_jump: true,
+            jump_cooldown: 0.3, // Задержка между прыжками (в секундах)
+            jump_timer: 0.0,
         }
     }
 }
@@ -85,7 +88,7 @@ fn move_cube(
     time: Res<Time>,
 ) {
     let speed = 5.0;
-    let jump_force = 3.0;
+    let jump_force = 5.0; // Сила прыжка
     let gravity = -9.81;
     let dt = time.delta_secs();
     
@@ -105,17 +108,20 @@ fn move_cube(
         transform.translation.x += speed * dt;
     }
     
-    // Прыжок
-    if keyboard_input.just_pressed(KeyCode::Space) && !jump.is_jumping {
-        jump.velocity = jump_force;
-        jump.is_jumping = true;
-        jump.current_jump_time = 0.0;
+    // Обработка таймера между прыжками
+    if !jump.can_jump && jump.jump_timer > 0.0 {
+        jump.jump_timer -= dt;
+        if jump.jump_timer <= 0.0 {
+            jump.can_jump = true;
+        }
     }
     
-    // Продолжаем прыжок при удержании пробела
-    if keyboard_input.pressed(KeyCode::Space) && jump.is_jumping && jump.current_jump_time < jump.max_jump_time {
+    // Прыжок
+    if keyboard_input.pressed(KeyCode::Space) && !jump.is_jumping && jump.can_jump {
         jump.velocity = jump_force;
-        jump.current_jump_time += dt;
+        jump.is_jumping = true;
+        jump.can_jump = false;
+        jump.jump_timer = jump.jump_cooldown;
     }
     
     // Применяем гравитацию и обновляем позицию по Y
@@ -128,7 +134,16 @@ fn move_cube(
             transform.translation.y = 0.5;
             jump.velocity = 0.0;
             jump.is_jumping = false;
-            jump.current_jump_time = 0.0;
+            
+            // Если пробел всё ещё удерживается, и таймер вышел, сразу прыгаем снова
+            if keyboard_input.pressed(KeyCode::Space) && jump.jump_timer <= 0.0 {
+                jump.velocity = jump_force;
+                jump.is_jumping = true;
+                jump.jump_timer = jump.jump_cooldown;
+            } else if jump.jump_timer <= 0.0 {
+                // Если пробел не нажат или таймер не вышел, просто разрешаем прыжок
+                jump.can_jump = true;
+            }
         }
     }
 }
@@ -204,19 +219,29 @@ fn check_exit(
 struct FollowCamera {
     offset: Vec3,
     lerp_speed: f32,
+    ignore_vertical: bool, // Игнорировать ли вертикальное движение объекта
 }
 
 fn follow_camera(
     time: Res<Time>,
-    cube_query: Query<&Transform, With<Cube>>,
+    cube_query: Query<(&Transform, Option<&Jump>), With<Cube>>,
     mut camera_query: Query<(&mut Transform, &FollowCamera), (With<Camera3d>, Without<Cube>)>,
 ) {
-    let Ok(cube_transform) = cube_query.get_single() else {
+    let Ok((cube_transform, maybe_jump)) = cube_query.get_single() else {
         return;
     };
     
     for (mut camera_transform, follow) in camera_query.iter_mut() {
-        let target_position = cube_transform.translation + follow.offset;
+        // Создаем позицию куба, игнорируя вертикальное положение, если нужно
+        let mut target_cube_pos = cube_transform.translation;
+        
+        // Если нужно игнорировать вертикальное движение и куб в прыжке
+        if follow.ignore_vertical && maybe_jump.is_some() && maybe_jump.unwrap().is_jumping {
+            // Заменяем Y-координату на базовую высоту куба (0.5)
+            target_cube_pos.y = 0.5;
+        }
+        
+        let target_position = target_cube_pos + follow.offset;
         
         // Плавно перемещаем камеру к целевой позиции
         camera_transform.translation = camera_transform.translation.lerp(
@@ -224,7 +249,16 @@ fn follow_camera(
             follow.lerp_speed * time.delta_secs()
         );
         
-        // Направляем камеру на куб
-        camera_transform.look_at(cube_transform.translation, Vec3::Y);
+        // Вычисляем целевой поворот (куб должен быть в центре вида камеры)
+        let target_rotation = Quat::from_rotation_arc(
+            (Vec3::NEG_Z).normalize(),
+            (target_cube_pos - camera_transform.translation).normalize()
+        );
+        
+        // Плавно поворачиваем камеру к целевой ориентации
+        camera_transform.rotation = camera_transform.rotation.slerp(
+            target_rotation,
+            follow.lerp_speed * time.delta_secs()
+        );
     }
 }
