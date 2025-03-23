@@ -2,14 +2,24 @@
 
 use bevy::prelude::*;
 
+// Константы для движения
+const MAX_SPEED: f32 = 6.0;
+const ACCELERATE: f32 = 10.0;
+const AIR_ACCELERATE: f32 = 1.0;
+const GRAVITY: f32 = -9.81;
+const JUMP_FORCE: f32 = 5.0;
+const MAX_JUMP_HEIGHT: f32 = 3.0; // Максимальная высота прыжка
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, setup)
         .add_systems(Update, (
-            move_cube,
-            draw_cursor.after(move_cube),
-            follow_camera.after(move_cube),
+            player_movement,
+            apply_acceleration,
+            update_position,
+            draw_cursor.after(update_position),
+            follow_camera.after(update_position),
             check_exit,
         ).chain())
         .run();
@@ -38,6 +48,9 @@ fn setup(
         Transform::from_xyz(0.0, 0.5, 0.0),
         Cube,
         Jump::default(),
+        Velocity::default(),
+        WishDirection::default(),
+        WishSpeed::default(),
     ));
     
     // light
@@ -63,7 +76,6 @@ struct Cube;
 
 #[derive(Component)]
 struct Jump {
-    velocity: f32,
     is_jumping: bool,
     can_jump: bool,
     jump_cooldown: f32,
@@ -73,7 +85,6 @@ struct Jump {
 impl Default for Jump {
     fn default() -> Self {
         Self {
-            velocity: 0.0,
             is_jumping: false,
             can_jump: true,
             jump_cooldown: 0.3, // Задержка между прыжками (в секундах)
@@ -82,33 +93,118 @@ impl Default for Jump {
     }
 }
 
-fn move_cube(
+#[derive(Component, Default)]
+struct Velocity(Vec3);
+
+#[derive(Component, Default)]
+struct WishDirection(Vec3);
+
+#[derive(Component, Default)]
+struct WishSpeed(f32);
+
+// Считываем ввод и обновляем желаемое направление движения
+fn player_movement(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<(&mut Transform, &mut Jump), With<Cube>>,
-    time: Res<Time>,
+    mut query: Query<(&mut WishDirection, &mut WishSpeed, &mut Jump, &mut Velocity), With<Cube>>,
 ) {
-    let speed = 5.0;
-    let jump_force = 5.0; // Сила прыжка
-    let gravity = -9.81;
-    let dt = time.delta_secs();
-    
-    let (mut transform, mut jump) = query.single_mut();
-    
-    // Горизонтальное движение
+    let (mut wishdir, mut wishspeed, mut jump, mut velocity) = query.single_mut();
+
+    let mut direction = Vec3::ZERO;
+
     if keyboard_input.pressed(KeyCode::KeyW) {
-        transform.translation.z -= speed * dt;
+        direction.z -= 1.0;
     }
     if keyboard_input.pressed(KeyCode::KeyS) {
-        transform.translation.z += speed * dt;
+        direction.z += 1.0;
     }
     if keyboard_input.pressed(KeyCode::KeyA) {
-        transform.translation.x -= speed * dt;
+        direction.x -= 1.0;
     }
     if keyboard_input.pressed(KeyCode::KeyD) {
-        transform.translation.x += speed * dt;
+        direction.x += 1.0;
+    }
+
+    if direction.length() > 0.0 {
+        direction = direction.normalize();
+    }
+
+    wishdir.0 = direction;
+    wishspeed.0 = MAX_SPEED;
+    
+    // Прыжок - обработка только нажатия, таймер обрабатывается в update_position
+    if keyboard_input.pressed(KeyCode::Space) && !jump.is_jumping && jump.can_jump {
+        jump.is_jumping = true;
+        jump.can_jump = false;
+        jump.jump_timer = jump.jump_cooldown;
+        // Устанавливаем начальную скорость прыжка здесь
+        velocity.0.y = JUMP_FORCE;
+    }
+}
+
+// Применяем ускорение
+fn apply_acceleration(
+    time: Res<Time>,
+    mut query: Query<(&WishDirection, &WishSpeed, &Jump, &mut Velocity, &Transform)>,
+) {
+    let (wishdir, wishspeed, jump, mut velocity, transform) = query.single_mut();
+    
+    // Применяем горизонтальное ускорение
+    let horizontal_velocity = Vec3::new(velocity.0.x, 0.0, velocity.0.z);
+    let currentspeed = horizontal_velocity.dot(wishdir.0);
+    let addspeed = wishspeed.0 - currentspeed;
+
+    if addspeed > 0.0 {
+        let accel = if !jump.is_jumping { ACCELERATE } else { AIR_ACCELERATE };
+        let accelspeed = (accel * time.delta_secs() * wishspeed.0).min(addspeed);
+
+        velocity.0.x += wishdir.0.x * accelspeed;
+        velocity.0.z += wishdir.0.z * accelspeed;
+    }
+
+    // Применяем вертикальное ускорение (гравитацию)
+    if jump.is_jumping {
+        velocity.0.y += GRAVITY * time.delta_secs();
+        
+        // Ограничиваем максимальную высоту прыжка
+        if transform.translation.y > MAX_JUMP_HEIGHT {
+            velocity.0.y = velocity.0.y.min(0.0);
+        }
+        
+        // Ограничиваем максимальную скорость падения
+        velocity.0.y = velocity.0.y.max(-20.0);
+    }
+}
+
+// Обновляем позицию на основе скорости
+fn update_position(
+    time: Res<Time>,
+    mut query: Query<(&mut Transform, &mut Velocity, &mut Jump), With<Cube>>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+) {
+    let (mut transform, mut velocity, mut jump) = query.single_mut();
+    let dt = time.delta_secs();
+    
+    // Применяем скорость к позиции
+    transform.translation += velocity.0 * time.delta_secs();
+    
+    // Проверяем приземление
+    if jump.is_jumping && transform.translation.y <= 0.5 {
+        transform.translation.y = 0.5;
+        velocity.0.y = 0.0;
+        jump.is_jumping = false;
+        
+        // Если пробел всё ещё удерживается и таймер прыжка вышел, сразу прыгаем снова
+        if keyboard_input.pressed(KeyCode::Space) && jump.jump_timer <= 0.0 {
+            jump.is_jumping = true;
+            velocity.0.y = JUMP_FORCE;
+            jump.jump_timer = jump.jump_cooldown;
+        } else if jump.jump_timer <= 0.0 {
+            // Если пробел не нажат или таймер не вышел, просто разрешаем прыжок
+            jump.can_jump = true;
+        }
     }
     
-    // Обработка таймера между прыжками
+    // Обновляем таймер прыжка
     if !jump.can_jump && jump.jump_timer > 0.0 {
         jump.jump_timer -= dt;
         if jump.jump_timer <= 0.0 {
@@ -116,35 +212,14 @@ fn move_cube(
         }
     }
     
-    // Прыжок
-    if keyboard_input.pressed(KeyCode::Space) && !jump.is_jumping && jump.can_jump {
-        jump.velocity = jump_force;
-        jump.is_jumping = true;
-        jump.can_jump = false;
-        jump.jump_timer = jump.jump_cooldown;
-    }
-    
-    // Применяем гравитацию и обновляем позицию по Y
-    if jump.is_jumping {
-        jump.velocity += gravity * dt;
-        transform.translation.y += jump.velocity * dt;
-        
-        // Проверяем приземление
-        if transform.translation.y <= 0.5 {
-            transform.translation.y = 0.5;
-            jump.velocity = 0.0;
-            jump.is_jumping = false;
-            
-            // Если пробел всё ещё удерживается, и таймер вышел, сразу прыгаем снова
-            if keyboard_input.pressed(KeyCode::Space) && jump.jump_timer <= 0.0 {
-                jump.velocity = jump_force;
-                jump.is_jumping = true;
-                jump.jump_timer = jump.jump_cooldown;
-            } else if jump.jump_timer <= 0.0 {
-                // Если пробел не нажат или таймер не вышел, просто разрешаем прыжок
-                jump.can_jump = true;
-            }
-        }
+    // Добавляем небольшое трение для горизонтального движения
+    if velocity.0.length() > 0.01 {
+        let friction = 0.95;
+        velocity.0.x *= friction;
+        velocity.0.z *= friction;
+    } else {
+        velocity.0.x = 0.0;
+        velocity.0.z = 0.0;
     }
 }
 
@@ -153,7 +228,7 @@ fn draw_cursor(
     ground: Single<&GlobalTransform, With<Ground>>,
     windows: Single<&Window>,
     mut gizmos: Gizmos,
-    mut cube_query: Query<&mut Transform, With<Cube>>,
+    mut cube_query: Query<(&mut Transform, &WishDirection), With<Cube>>,
 ) {
     let (camera, camera_transform) = *camera_query;
 
@@ -186,7 +261,7 @@ fn draw_cursor(
     );
 
     // Поворачиваем куб в направлении точки пересечения
-    if let Ok(mut cube_transform) = cube_query.get_single_mut() {
+    if let Ok((mut cube_transform, wish_dir)) = cube_query.get_single_mut() {
         let target_point = point;
         let current_pos = cube_transform.translation;
         
@@ -197,10 +272,16 @@ fn draw_cursor(
             target_point.z - current_pos.z,
         ).normalize();
 
+        // Стандартное направление "вперед" в Bevy
+        let forward = Vec3::NEG_Z;
+
         if direction != Vec3::ZERO {
-            // Создаем поворот от вектора вперед (по умолчанию для куба) к направлению цели
-            let forward = Vec3::NEG_Z; // Стандартное направление "вперед" в Bevy
+            // Создаем поворот от вектора вперед к направлению цели
             let rotation = Quat::from_rotation_arc(forward, direction);
+            cube_transform.rotation = rotation;
+        } else if wish_dir.0 != Vec3::ZERO {
+            // Если нет направления к курсору, но куб движется, поворачиваем его в направлении движения
+            let rotation = Quat::from_rotation_arc(forward, wish_dir.0);
             cube_transform.rotation = rotation;
         }
     }
@@ -224,10 +305,10 @@ struct FollowCamera {
 
 fn follow_camera(
     time: Res<Time>,
-    cube_query: Query<(&Transform, Option<&Jump>), With<Cube>>,
+    cube_query: Query<(&Transform, &Jump), With<Cube>>,
     mut camera_query: Query<(&mut Transform, &FollowCamera), (With<Camera3d>, Without<Cube>)>,
 ) {
-    let Ok((cube_transform, maybe_jump)) = cube_query.get_single() else {
+    let Ok((cube_transform, jump)) = cube_query.get_single() else {
         return;
     };
     
@@ -236,7 +317,7 @@ fn follow_camera(
         let mut target_cube_pos = cube_transform.translation;
         
         // Если нужно игнорировать вертикальное движение и куб в прыжке
-        if follow.ignore_vertical && maybe_jump.is_some() && maybe_jump.unwrap().is_jumping {
+        if follow.ignore_vertical && jump.is_jumping {
             // Заменяем Y-координату на базовую высоту куба (0.5)
             target_cube_pos.y = 0.5;
         }
