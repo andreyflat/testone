@@ -1,12 +1,11 @@
 //! A simple 3D scene with light shining over a cube sitting on a plane.
 
 use bevy::prelude::*;
-use bevy::math::Isometry3d;
 
 // Константы для движения
 const MAX_SPEED: f32 = 4.0;
-const ACCELERATE: f32 = 6.0;
-const AIR_ACCELERATE: f32 = 6.0;
+const ACCELERATE: f32 = 8.0;
+const AIR_ACCELERATE: f32 = 8.0;
 const GRAVITY: f32 = -9.81;
 const JUMP_FORCE: f32 = 3.0;
 const MAX_JUMP_HEIGHT: f32 = 2.0; // Максимальная высота прыжка
@@ -28,6 +27,33 @@ fn main() {
         ).chain())
         .run();
 }
+/// draw fps counter
+
+#[derive(Component)]
+struct FpsText;
+
+fn fps_counter(mut commands: Commands) {
+    commands.spawn((
+        Text::new("FPS: "),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(5.0),
+            right: Val::Px(5.0),
+           ..default()
+        },
+        FpsText,
+    ));
+}
+
+fn update_fps_display(
+   time: Res<Time>,
+   mut query: Query<&mut Text, With<FpsText>>,
+) {
+   let fps = 1.0 / time.delta_secs();
+   for mut text in &mut query {
+       text.0 = format!("FPS: {:.1}", fps);
+   }
+}
 
 #[derive(Component)]
 struct Ground;
@@ -40,8 +66,8 @@ fn setup(
 ) {
     // ground plane
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(20., 20.))),
-        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(100., 100.))),
+        MeshMaterial3d(materials.add(Color::srgb(0.1, 0.1, 0.1))),
         Ground,
     ));
     
@@ -359,29 +385,4 @@ fn follow_camera(
     }
 }
 
-fn fps_counter(mut commands: Commands) {
-     commands.spawn((
-         Text::new("FPS: "),
-         Node {
-             position_type: PositionType::Absolute,
-             top: Val::Px(5.0),
-             right: Val::Px(5.0),
-            ..default()
-         },
-         FpsText,
-     ));
- }
 
-
- #[derive(Component)]
-  struct FpsText;
-
-fn update_fps_display(
-     time: Res<Time>,
-     mut query: Query<&mut Text, With<FpsText>>,
- ) {
-     let fps = 1.0 / time.delta_secs();
-     for mut text in &mut query {
-         text.0 = format!("FPS: {:.1}", fps);
-     }
- }
