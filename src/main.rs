@@ -22,8 +22,9 @@ fn main() {
             update_position,
             draw_cursor.after(update_position),
             follow_camera.after(update_position),
-            display_speed.after(update_position),
             check_exit,
+            fps_counter,
+            update_fps_display,
         ).chain())
         .run();
 }
@@ -358,46 +359,29 @@ fn follow_camera(
     }
 }
 
-// Система отображения скорости с помощью gizmos
-fn display_speed(
-    mut gizmos: Gizmos,
-    query_cube: Query<(&Velocity, &Transform), With<Cube>>,
-) {
-    if let Ok((velocity, transform)) = query_cube.get_single() {
-        // Получаем только горизонтальную скорость (x, z)
-        let horizontal_speed = Vec3::new(velocity.0.x, 0.0, velocity.0.z).length();
-        
-        // Определяем цвет в зависимости от скорости
-        let color = if horizontal_speed >= MAX_AIR_SPEED * 0.8 {
-            // Почти максимальная скорость - красный
-            Color::srgb(1.0, 0.0, 0.0)
-        } else if horizontal_speed >= MAX_SPEED * 1.5 {
-            // Ускоренная скорость - оранжевый
-            Color::srgb(1.0, 0.5, 0.0)
-        } else if horizontal_speed >= MAX_SPEED {
-            // Выше нормальной скорости - желтый
-            Color::srgb(1.0, 1.0, 0.0)
-        } else {
-            // Нормальная скорость - зеленый
-            Color::srgb(0.0, 1.0, 0.0)
-        };
-        
-        // Отображаем индикатор скорости над кубом
-        let speed_scale = (horizontal_speed / MAX_SPEED).clamp(0.5, 2.0);
-        let position = transform.translation + Vec3::new(0.0, 1.5, 0.0);
-        
-        // Рисуем индикатор скорости (круг)
-        // В Bevy 0.15 gizmos.circle принимает Isometry3d вместо Vec3
-        let isometry = Isometry3d::new(position, Quat::IDENTITY);
-        gizmos.circle(
-            isometry,
-            0.2 * speed_scale,
-            color,
-        );
-        
-        // Выводим информацию о скорости в консоль (примерно раз в секунду)
-        if (transform.translation.x + transform.translation.z).fract().abs() < 0.01 {
-            println!("Скорость: {:.2}", horizontal_speed);
-        }
-    }
-}
+fn fps_counter(mut commands: Commands) {
+     commands.spawn((
+         Text::new("FPS: "),
+         Node {
+             position_type: PositionType::Absolute,
+             top: Val::Px(5.0),
+             right: Val::Px(5.0),
+            ..default()
+         },
+         FpsText,
+     ));
+ }
+
+
+ #[derive(Component)]
+  struct FpsText;
+
+fn update_fps_display(
+     time: Res<Time>,
+     mut query: Query<&mut Text, With<FpsText>>,
+ ) {
+     let fps = 1.0 / time.delta_secs();
+     for mut text in &mut query {
+         text.0 = format!("FPS: {:.1}", fps);
+     }
+ }

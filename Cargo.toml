@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.15.3"
+bevy_text = { version = "0.15.3", features = ["default_font"] }
 
 [workspace]
 resolver = "2" # Important! wgpu/Bevy needs this!
