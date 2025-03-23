@@ -1,14 +1,16 @@
 //! A simple 3D scene with light shining over a cube sitting on a plane.
 
 use bevy::prelude::*;
+use bevy::math::Isometry3d;
 
 // Константы для движения
-const MAX_SPEED: f32 = 6.0;
-const ACCELERATE: f32 = 10.0;
-const AIR_ACCELERATE: f32 = 1.0;
+const MAX_SPEED: f32 = 4.0;
+const ACCELERATE: f32 = 6.0;
+const AIR_ACCELERATE: f32 = 6.0;
 const GRAVITY: f32 = -9.81;
-const JUMP_FORCE: f32 = 5.0;
-const MAX_JUMP_HEIGHT: f32 = 3.0; // Максимальная высота прыжка
+const JUMP_FORCE: f32 = 3.0;
+const MAX_JUMP_HEIGHT: f32 = 2.0; // Максимальная высота прыжка
+const MAX_AIR_SPEED: f32 = 16.0; // Максимальная скорость в воздухе
 
 fn main() {
     App::new()
@@ -20,6 +22,7 @@ fn main() {
             update_position,
             draw_cursor.after(update_position),
             follow_camera.after(update_position),
+            display_speed.after(update_position),
             check_exit,
         ).chain())
         .run();
@@ -159,6 +162,16 @@ fn apply_acceleration(
 
         velocity.0.x += wishdir.0.x * accelspeed;
         velocity.0.z += wishdir.0.z * accelspeed;
+        
+        // Ограничиваем горизонтальную скорость в зависимости от состояния
+        let max_horizontal_speed = if jump.is_jumping { MAX_AIR_SPEED } else { MAX_SPEED };
+        let horizontal_speed = Vec3::new(velocity.0.x, 0.0, velocity.0.z).length();
+        
+        if horizontal_speed > max_horizontal_speed {
+            let scale = max_horizontal_speed / horizontal_speed;
+            velocity.0.x *= scale;
+            velocity.0.z *= scale;
+        }
     }
 
     // Применяем вертикальное ускорение (гравитацию)
@@ -212,9 +225,10 @@ fn update_position(
         }
     }
     
-    // Добавляем небольшое трение для горизонтального движения
+    // Добавляем трение для горизонтального движения
     if velocity.0.length() > 0.01 {
-        let friction = 0.95;
+        // Трение на земле сильнее, чем в воздухе
+        let friction = if jump.is_jumping { 0.98 } else { 0.90 };
         velocity.0.x *= friction;
         velocity.0.z *= friction;
     } else {
@@ -341,5 +355,49 @@ fn follow_camera(
             target_rotation,
             follow.lerp_speed * time.delta_secs()
         );
+    }
+}
+
+// Система отображения скорости с помощью gizmos
+fn display_speed(
+    mut gizmos: Gizmos,
+    query_cube: Query<(&Velocity, &Transform), With<Cube>>,
+) {
+    if let Ok((velocity, transform)) = query_cube.get_single() {
+        // Получаем только горизонтальную скорость (x, z)
+        let horizontal_speed = Vec3::new(velocity.0.x, 0.0, velocity.0.z).length();
+        
+        // Определяем цвет в зависимости от скорости
+        let color = if horizontal_speed >= MAX_AIR_SPEED * 0.8 {
+            // Почти максимальная скорость - красный
+            Color::srgb(1.0, 0.0, 0.0)
+        } else if horizontal_speed >= MAX_SPEED * 1.5 {
+            // Ускоренная скорость - оранжевый
+            Color::srgb(1.0, 0.5, 0.0)
+        } else if horizontal_speed >= MAX_SPEED {
+            // Выше нормальной скорости - желтый
+            Color::srgb(1.0, 1.0, 0.0)
+        } else {
+            // Нормальная скорость - зеленый
+            Color::srgb(0.0, 1.0, 0.0)
+        };
+        
+        // Отображаем индикатор скорости над кубом
+        let speed_scale = (horizontal_speed / MAX_SPEED).clamp(0.5, 2.0);
+        let position = transform.translation + Vec3::new(0.0, 1.5, 0.0);
+        
+        // Рисуем индикатор скорости (круг)
+        // В Bevy 0.15 gizmos.circle принимает Isometry3d вместо Vec3
+        let isometry = Isometry3d::new(position, Quat::IDENTITY);
+        gizmos.circle(
+            isometry,
+            0.2 * speed_scale,
+            color,
+        );
+        
+        // Выводим информацию о скорости в консоль (примерно раз в секунду)
+        if (transform.translation.x + transform.translation.z).fract().abs() < 0.01 {
+            println!("Скорость: {:.2}", horizontal_speed);
+        }
     }
 }
