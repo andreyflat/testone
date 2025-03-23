@@ -132,11 +132,12 @@ fn setup(
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(8.0, 8.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 5.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         FollowCamera {
-            offset: Vec3::new(8.0, 8.0, 10.0),
-            lerp_speed: 2.0,
-            ignore_vertical: true,
+            distance: 10.0,     // Расстояние от куба до камеры
+            height: 5.0,        // Высота камеры над кубом
+            pitch_offset: -5.0, // Смещение для наклона камеры вниз
+            lerp_speed: 5.0,    // Скорость интерполяции
         },
     ));
 }
@@ -410,56 +411,52 @@ fn check_exit(
 
 #[derive(Component)]
 struct FollowCamera {
-    offset: Vec3,
-    lerp_speed: f32,
-    ignore_vertical: bool, // Игнорировать ли вертикальное движение объекта
+    distance: f32,       // Расстояние от камеры до куба (по оси Z)
+    height: f32,         // Высота камеры над кубом
+    pitch_offset: f32,   // Смещение для наклона камеры (отрицательное значение наклоняет вниз)
+    lerp_speed: f32,     // Скорость интерполяции
 }
 
 fn follow_camera(
     time: Res<Time>,
-    cube_query: Query<(&Transform, &Jump), With<Cube>>,
-    mut camera_query: Query<(&mut Transform, &FollowCamera), (With<Camera3d>, Without<Cube>)>,
+    cube_query: Query<&Transform, With<Cube>>,
+    mut camera_query: Query<(&mut Transform, &mut FollowCamera), (With<Camera3d>, Without<Cube>)>,
 ) {
-    let Ok((cube_transform, jump)) = cube_query.get_single() else {
+    let Ok(cube_transform) = cube_query.get_single() else {
         return;
     };
     
     for (mut camera_transform, follow) in camera_query.iter_mut() {
-        // Создаем позицию куба, игнорируя вертикальное положение, если нужно
-        let mut target_cube_pos = cube_transform.translation;
+        // Используем только горизонтальные координаты куба,
+        // игнорируем вертикальную составляющую (прыжки)
+        let cube_position_horizontal = Vec3::new(
+            cube_transform.translation.x,
+            0.0, // Фиксированная базовая высота для игнорирования прыжков
+            cube_transform.translation.z
+        );
         
-        // Если нужно игнорировать вертикальное движение и куб в прыжке
-        if follow.ignore_vertical && jump.is_jumping {
-            target_cube_pos.y = 0.5;
-        }
-        
-        let target_position = target_cube_pos + follow.offset;
+        // Камера будет находиться позади и на фиксированной высоте
+        let new_camera_position = Vec3::new(
+            cube_position_horizontal.x,
+            follow.height, // Фиксированная высота камеры
+            cube_position_horizontal.z + follow.distance
+        );
         
         // Плавно перемещаем камеру к целевой позиции
         camera_transform.translation = camera_transform.translation.lerp(
-            target_position,
+            new_camera_position, 
             follow.lerp_speed * time.delta_secs()
         );
         
-        // Вычисляем направление от камеры к кубу только в горизонтальной плоскости
-        let horizontal_direction = (Vec3::new(
-            target_cube_pos.x - camera_transform.translation.x,
-            0.0,
-            target_cube_pos.z - camera_transform.translation.z
-        )).normalize();
-
-        // Создаем вектор направления с фиксированным углом наклона
-        let fixed_look = Vec3::new(
-            horizontal_direction.x,
-            -0.5,
-            horizontal_direction.z
-        ).normalize();
-        
-        // Создаем поворот от вектора вперед к направлению взгляда
-        let target_rotation = Quat::from_rotation_arc(
-            Vec3::NEG_Z,
-            fixed_look
+        // Смотрим на позицию куба с учетом смещения для наклона камеры
+        let look_target = Vec3::new(
+            cube_transform.translation.x,
+            camera_transform.translation.y + follow.pitch_offset, // Добавляем смещение для наклона
+            cube_transform.translation.z
         );
+        
+        let look_direction = (look_target - camera_transform.translation).normalize();
+        let target_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, look_direction);
         
         // Плавно поворачиваем камеру к целевой ориентации
         camera_transform.rotation = camera_transform.rotation.slerp(
