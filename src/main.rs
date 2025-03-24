@@ -4,8 +4,9 @@ use bevy::{
     prelude::*,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     window::{WindowMode, PresentMode},
-    pbr::CascadeShadowConfig,
 };
+
+mod lights;
 
 // Константы для движения
 const MAX_SPEED: f32 = 8.0;
@@ -105,29 +106,15 @@ fn setup(
             ..default()
         })),
         Transform::from_xyz(0.0, 0.5, 0.0),
-        Cube,
+        Player,
         Jump::default(),
         Velocity::default(),
         WishDirection::default(),
         WishSpeed::default(),
     ));
     
-    // light
-    commands.spawn((
-        DirectionalLight {
-            shadows_enabled: true,
-            illuminance: 10000.0,
-            shadow_depth_bias: 0.02,
-            shadow_normal_bias: 0.6,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-        CascadeShadowConfig {
-            minimum_distance: 0.1,
-            bounds: vec![0.1, 5.0, 20.0, 100.0],
-            overlap_proportion: 0.2,
-        },
-    ));
+    // Вызываем функцию из модуля lights для создания света
+    lights::spawn_directional_light(&mut commands);
     
     // camera
     commands.spawn((
@@ -143,7 +130,7 @@ fn setup(
 }
 
 #[derive(Component)]
-struct Cube;
+struct Player;
 
 #[derive(Component)]
 struct Jump {
@@ -179,9 +166,9 @@ fn player_movement(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     ground: Query<&GlobalTransform, With<Ground>>,
     windows: Query<&Window>,
-    mut query: Query<(&Transform, &mut WishDirection, &mut WishSpeed, &mut Jump, &mut Velocity), With<Cube>>,
+    mut query: Query<(&Transform, &mut WishDirection, &mut WishSpeed, &mut Jump, &mut Velocity), With<Player>>,
 ) {
-    let (cube_transform, mut wishdir, mut wishspeed, mut jump, mut velocity) = query.single_mut();
+    let (player_transform, mut wishdir, mut wishspeed, mut jump, mut velocity) = query.single_mut();
     let (camera, camera_transform) = camera_query.single();
     let ground_transform = ground.iter().next().unwrap();
 
@@ -200,11 +187,11 @@ fn player_movement(
                 if keyboard_input.pressed(KeyCode::KeyW) {
                     let target_position = Vec3::new(
                         cursor_world_position.x,
-                        cube_transform.translation.y, // Сохраняем текущую высоту
+                        player_transform.translation.y, // Сохраняем текущую высоту
                         cursor_world_position.z
                     );
                     
-                    direction = (target_position - cube_transform.translation).normalize();
+                    direction = (target_position - player_transform.translation).normalize();
                 }
             }
         }
@@ -285,7 +272,7 @@ fn apply_acceleration(
 // Обновляем позицию на основе скорости
 fn update_position(
     time: Res<Time>,
-    mut query: Query<(&mut Transform, &mut Velocity, &mut Jump), With<Cube>>,
+    mut query: Query<(&mut Transform, &mut Velocity, &mut Jump), With<Player>>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
 ) {
     let (mut transform, mut velocity, mut jump) = query.single_mut();
@@ -336,7 +323,7 @@ fn draw_cursor(
     ground: Query<&GlobalTransform, With<Ground>>,
     windows: Single<&Window>,
     mut gizmos: Gizmos,
-    mut cube_query: Query<(&mut Transform, &WishDirection), With<Cube>>,
+    mut player_query: Query<(&mut Transform, &WishDirection), With<Player>>,
 ) {
     let (camera, camera_transform) = *camera_query;
     let ground_transform = if let Some(transform) = ground.iter().next() {
@@ -374,9 +361,9 @@ fn draw_cursor(
     );
 
     // Поворачиваем куб в направлении точки пересечения
-    if let Ok((mut cube_transform, wish_dir)) = cube_query.get_single_mut() {
+    if let Ok((mut player_transform, wish_dir)) = player_query.get_single_mut() {
         let target_point = point;
-        let current_pos = cube_transform.translation;
+        let current_pos = player_transform.translation;
         
         // Получаем направление только в горизонтальной плоскости
         let direction = Vec3::new(
@@ -391,11 +378,11 @@ fn draw_cursor(
         if direction != Vec3::ZERO {
             // Создаем поворот от вектора вперед к направлению цели
             let rotation = Quat::from_rotation_arc(forward, direction);
-            cube_transform.rotation = rotation;
+            player_transform.rotation = rotation;
         } else if wish_dir.0 != Vec3::ZERO {
             // Если нет направления к курсору, но куб движется, поворачиваем его в направлении движения
             let rotation = Quat::from_rotation_arc(forward, wish_dir.0);
-            cube_transform.rotation = rotation;
+            player_transform.rotation = rotation;
         }
     }
 }
@@ -419,27 +406,27 @@ struct FollowCamera {
 
 fn follow_camera(
     time: Res<Time>,
-    cube_query: Query<&Transform, With<Cube>>,
-    mut camera_query: Query<(&mut Transform, &mut FollowCamera), (With<Camera3d>, Without<Cube>)>,
+    player_query: Query<&Transform, With<Player>>,
+    mut camera_query: Query<(&mut Transform, &mut FollowCamera), (With<Camera3d>, Without<Player>)>,
 ) {
-    let Ok(cube_transform) = cube_query.get_single() else {
+    let Ok(player_transform) = player_query.get_single() else {
         return;
     };
     
     for (mut camera_transform, follow) in camera_query.iter_mut() {
         // Используем только горизонтальные координаты куба,
         // игнорируем вертикальную составляющую (прыжки)
-        let cube_position_horizontal = Vec3::new(
-            cube_transform.translation.x,
+        let player_position_horizontal = Vec3::new(
+            player_transform.translation.x,
             0.0, // Фиксированная базовая высота для игнорирования прыжков
-            cube_transform.translation.z
+            player_transform.translation.z
         );
         
         // Камера будет находиться позади и на фиксированной высоте
         let new_camera_position = Vec3::new(
-            cube_position_horizontal.x,
+            player_position_horizontal.x,
             follow.height, // Фиксированная высота камеры
-            cube_position_horizontal.z + follow.distance
+            player_position_horizontal.z + follow.distance
         );
         
         // Плавно перемещаем камеру к целевой позиции
@@ -450,9 +437,9 @@ fn follow_camera(
         
         // Смотрим на позицию куба с учетом смещения для наклона камеры
         let look_target = Vec3::new(
-            cube_transform.translation.x,
+            player_transform.translation.x,
             camera_transform.translation.y + follow.pitch_offset, // Добавляем смещение для наклона
-            cube_transform.translation.z
+            player_transform.translation.z
         );
         
         let look_direction = (look_target - camera_transform.translation).normalize();
