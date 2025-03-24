@@ -1,10 +1,38 @@
 use bevy::prelude::*;
 use crate::world::Ground;
 
+#[derive(Resource)]
+pub struct GameSettings {
+    pub sv_maxspeed: f32,
+    pub sv_accelerate: f32,
+    pub sv_air_accelerate: f32,
+    pub sv_gravity: f32,
+    pub sv_jump_force: f32,
+    pub sv_max_jump_height: f32,
+    pub sv_max_air_speed: f32,
+    pub sv_strafe_speed_multiplier: f32,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            sv_maxspeed: 10.0,
+            sv_accelerate: 20.0,
+            sv_air_accelerate: 20.0,
+            sv_gravity: -9.81,
+            sv_jump_force: 4.0,
+            sv_max_jump_height: 2.0,
+            sv_max_air_speed: 20.0,
+            sv_strafe_speed_multiplier: 1.1,
+        }
+    }
+}
+
 pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_player)
+        app.insert_resource(GameSettings::default())
+            .add_systems(Startup, spawn_player)
             .add_systems(Update, (
                 player_movement,
                 apply_acceleration,
@@ -12,15 +40,6 @@ impl Plugin for PlayerPlugin {
             ).chain());
     }
 }
-
-// Константы для движения
-const MAX_SPEED: f32 = 8.0;
-const ACCELERATE: f32 = 16.0;
-const AIR_ACCELERATE: f32 = 16.0;
-const GRAVITY: f32 = -9.81;
-const JUMP_FORCE: f32 = 4.0;
-const MAX_JUMP_HEIGHT: f32 = 2.0; // Максимальная высота прыжка
-const MAX_AIR_SPEED: f32 = 16.0; // Максимальная скорость в воздухе
 
 #[derive(Component)]
 pub struct Player;
@@ -81,6 +100,7 @@ fn player_movement(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     ground: Query<&GlobalTransform, With<Ground>>,
     windows: Query<&Window>,
+    settings: Res<GameSettings>,
     mut query: Query<(&Transform, &mut WishDirection, &mut WishSpeed, &mut Jump, &mut Velocity), With<Player>>,
 ) {
     let (player_transform, mut wishdir, mut wishspeed, mut jump, mut velocity) = query.single_mut();
@@ -132,12 +152,12 @@ fn player_movement(
         
         // Движение влево (A) - противоположно направлению вправо
         if keyboard_input.pressed(KeyCode::KeyA) {
-            direction -= right_direction;
+            direction -= right_direction * settings.sv_strafe_speed_multiplier;
         }
         
         // Движение вправо (D)
         if keyboard_input.pressed(KeyCode::KeyD) {
-            direction += right_direction;
+            direction += right_direction * settings.sv_strafe_speed_multiplier;
         }
     } else {
         // Если направление к курсору не определено, используем мировые координаты
@@ -158,20 +178,21 @@ fn player_movement(
 
     wishdir.0 = direction;
     // Устанавливаем желаемую скорость в зависимости от состояния прыжка
-    wishspeed.0 = if jump.is_jumping { MAX_AIR_SPEED } else { MAX_SPEED };
+    wishspeed.0 = if jump.is_jumping { settings.sv_max_air_speed } else { settings.sv_maxspeed };
     
     // Обработка прыжка
     if keyboard_input.pressed(KeyCode::Space) && !jump.is_jumping && jump.can_jump {
         jump.is_jumping = true;
         jump.can_jump = false;
         jump.jump_timer = jump.jump_cooldown;
-        velocity.0.y = JUMP_FORCE;
+        velocity.0.y = settings.sv_jump_force;
     }
 }
 
 // Применяем ускорение
 fn apply_acceleration(
     time: Res<Time>,
+    settings: Res<GameSettings>,
     mut query: Query<(&WishDirection, &WishSpeed, &Jump, &mut Velocity, &Transform)>,
 ) {
     let (wishdir, wishspeed, jump, mut velocity, transform) = query.single_mut();
@@ -182,14 +203,14 @@ fn apply_acceleration(
     let addspeed = wishspeed.0 - currentspeed;
 
     if addspeed > 0.0 {
-        let accel = if !jump.is_jumping { ACCELERATE } else { AIR_ACCELERATE };
+        let accel = if !jump.is_jumping { settings.sv_accelerate } else { settings.sv_air_accelerate };
         let accelspeed = (accel * time.delta_secs() * wishspeed.0).min(addspeed);
 
         velocity.0.x += wishdir.0.x * accelspeed;
         velocity.0.z += wishdir.0.z * accelspeed;
         
         // Ограничиваем горизонтальную скорость в зависимости от состояния
-        let max_horizontal_speed = if jump.is_jumping { MAX_AIR_SPEED } else { MAX_SPEED };
+        let max_horizontal_speed = if jump.is_jumping { settings.sv_max_air_speed } else { settings.sv_maxspeed };
         let horizontal_speed = Vec3::new(velocity.0.x, 0.0, velocity.0.z).length();
         
         if horizontal_speed > max_horizontal_speed {
@@ -201,10 +222,10 @@ fn apply_acceleration(
 
     // Применяем вертикальное ускорение (гравитацию)
     if jump.is_jumping {
-        velocity.0.y += GRAVITY * time.delta_secs();
+        velocity.0.y += settings.sv_gravity * time.delta_secs();
         
         // Ограничиваем максимальную высоту прыжка
-        if transform.translation.y > MAX_JUMP_HEIGHT {
+        if transform.translation.y > settings.sv_max_jump_height {
             velocity.0.y = velocity.0.y.min(0.0);
         }
         
@@ -216,6 +237,7 @@ fn apply_acceleration(
 // Обновляем позицию на основе скорости
 pub fn update_position(
     time: Res<Time>,
+    settings: Res<GameSettings>,
     mut query: Query<(&mut Transform, &mut Velocity, &mut Jump), With<Player>>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
 ) {
@@ -234,7 +256,7 @@ pub fn update_position(
         // Если пробел всё ещё удерживается и таймер прыжка вышел, сразу прыгаем снова
         if keyboard_input.pressed(KeyCode::Space) && jump.jump_timer <= 0.0 {
             jump.is_jumping = true;
-            velocity.0.y = JUMP_FORCE;
+            velocity.0.y = settings.sv_jump_force;
             jump.jump_timer = jump.jump_cooldown;
         } else if jump.jump_timer <= 0.0 {
             // Если пробел не нажат или таймер не вышел, просто разрешаем прыжок
@@ -253,7 +275,7 @@ pub fn update_position(
     // Добавляем трение для горизонтального движения
     if velocity.0.length() > 0.01 {
         // Трение на земле сильнее, чем в воздухе
-        let friction = if jump.is_jumping { 0.95 } else { 0.92 };
+        let friction = if jump.is_jumping { 0.94 } else { 0.90 };  // Уменьшаем трение для лучшего сохранения скорости
         velocity.0.x *= friction;
         velocity.0.z *= friction;
     } else {
