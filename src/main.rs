@@ -123,7 +123,6 @@ fn setup(
         FollowCamera {
             distance: 10.0,     // Расстояние от куба до камеры
             height: 5.0,        // Высота камеры над кубом
-            pitch_offset: -5.0, // Смещение для наклона камеры вниз
             lerp_speed: 5.0,    // Скорость интерполяции
         },
     ));
@@ -173,6 +172,7 @@ fn player_movement(
     let ground_transform = ground.iter().next().unwrap();
 
     let mut direction = Vec3::ZERO;
+    let mut forward_direction = Vec3::ZERO;
 
     // Получаем позицию курсора и вычисляем точку пересечения с землей
     if let Some(cursor_position) = windows.single().cursor_position() {
@@ -183,29 +183,57 @@ fn player_movement(
             ) {
                 let cursor_world_position = ray.get_point(distance);
                 
+                // Вычисляем направление к курсору (будет использовано как "вперед")
+                let target_position = Vec3::new(
+                    cursor_world_position.x,
+                    player_transform.translation.y,
+                    cursor_world_position.z
+                );
+                
+                forward_direction = (target_position - player_transform.translation).normalize();
+                
                 // Если нажата клавиша W, двигаемся в направлении курсора
                 if keyboard_input.pressed(KeyCode::KeyW) {
-                    let target_position = Vec3::new(
-                        cursor_world_position.x,
-                        player_transform.translation.y, // Сохраняем текущую высоту
-                        cursor_world_position.z
-                    );
-                    
-                    direction = (target_position - player_transform.translation).normalize();
+                    direction += forward_direction;
                 }
             }
         }
     }
 
-    // Добавляем стандартное управление для остальных клавиш
-    if keyboard_input.pressed(KeyCode::KeyS) {
-        direction.z += 1.0;
-    }
-    if keyboard_input.pressed(KeyCode::KeyA) {
-        direction.x -= 1.0;
-    }
-    if keyboard_input.pressed(KeyCode::KeyD) {
-        direction.x += 1.0;
+    // Если у нас есть направление вперед, считаем направления право и назад
+    if forward_direction != Vec3::ZERO {
+        // Получаем вектор "вправо" относительно направления к курсору
+        let right_direction = Vec3::new(
+            -forward_direction.z,
+            0.0,
+            forward_direction.x
+        ).normalize();
+
+        // Движение назад (S) - противоположно направлению вперед
+        if keyboard_input.pressed(KeyCode::KeyS) {
+            direction -= forward_direction;
+        }
+        
+        // Движение влево (A) - противоположно направлению вправо
+        if keyboard_input.pressed(KeyCode::KeyA) {
+            direction -= right_direction;
+        }
+        
+        // Движение вправо (D)
+        if keyboard_input.pressed(KeyCode::KeyD) {
+            direction += right_direction;
+        }
+    } else {
+        // Если направление к курсору не определено, используем мировые координаты
+        if keyboard_input.pressed(KeyCode::KeyS) {
+            direction.z += 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::KeyA) {
+            direction.x -= 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::KeyD) {
+            direction.x += 1.0;
+        }
     }
 
     if direction.length() > 0.0 {
@@ -400,7 +428,6 @@ fn check_exit(
 struct FollowCamera {
     distance: f32,       // Расстояние от камеры до куба (по оси Z)
     height: f32,         // Высота камеры над кубом
-    pitch_offset: f32,   // Смещение для наклона камеры (отрицательное значение наклоняет вниз)
     lerp_speed: f32,     // Скорость интерполяции
 }
 
@@ -435,21 +462,8 @@ fn follow_camera(
             follow.lerp_speed * time.delta_secs()
         );
         
-        // Смотрим на позицию куба с учетом смещения для наклона камеры
-        let look_target = Vec3::new(
-            player_transform.translation.x,
-            camera_transform.translation.y + follow.pitch_offset, // Добавляем смещение для наклона
-            player_transform.translation.z
-        );
-        
-        let look_direction = (look_target - camera_transform.translation).normalize();
-        let target_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, look_direction);
-        
-        // Плавно поворачиваем камеру к целевой ориентации
-        camera_transform.rotation = camera_transform.rotation.slerp(
-            target_rotation,
-            follow.lerp_speed * time.delta_secs()
-        );
+        // Устанавливаем фиксированную ориентацию камеры (смотрит вниз под углом)
+        camera_transform.rotation = Quat::from_rotation_x(-0.5);
     }
 }
 
