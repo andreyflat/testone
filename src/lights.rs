@@ -13,7 +13,7 @@ pub fn spawn_directional_light(commands: &mut Commands) {
             shadow_normal_bias: 0.6,
             ..default()
         },
-        Transform::from_xyz(4.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(14.0, 10.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
         CascadeShadowConfig {
             minimum_distance: 0.1,
             bounds: vec![0.1, 5.0, 20.0, 100.0],

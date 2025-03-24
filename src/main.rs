@@ -98,7 +98,7 @@ fn setup(
     
     // cube
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.25, 1.0, 0.25))),
+        Mesh3d(meshes.add(Capsule3d::new(0.25, 0.5))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb_u8(124, 144, 255),
             perceptual_roughness: 0.2,
