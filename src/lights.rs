@@ -3,8 +3,19 @@ use bevy::{
     pbr::CascadeShadowConfig,
 };
 
+pub struct LightsPlugin;
+impl Plugin for LightsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_lights);
+    }
+}
+
+fn spawn_lights(mut commands: Commands) {
+    spawn_directional_light(&mut commands);
+}
+
 // Функция для создания направленного света
-pub fn spawn_directional_light(commands: &mut Commands) {
+fn spawn_directional_light(commands: &mut Commands) {
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
