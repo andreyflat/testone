@@ -16,49 +16,17 @@ fn spawn_floor(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Создаем материалы для шахматной доски
-    let dark_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.2, 0.2, 0.2),
-        perceptual_roughness: 0.9,
-        metallic: 0.0,
-        ..default()
-    });
-    
-    let light_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.8, 0.8, 0.8),
-        perceptual_roughness: 0.9,
-        metallic: 0.0,
-        ..default()
-    });
-
-    // Создаем шахматный паттерн из плоскостей
-    let tile_size = 2.0;
-    let board_size = 15; // Количество клеток в одну сторону
-    let plane_mesh = meshes.add(Plane3d::default().mesh().size(tile_size, tile_size));
-    
-    for x in -board_size..board_size {
-        for z in -board_size..board_size {
-            let position = Vec3::new(
-                x as f32 * tile_size,
-                0.0,
-                z as f32 * tile_size
-            );
-            
-            // Выбираем материал в зависимости от четности суммы координат
-            let material = if (x + z) % 2 == 0 {
-                dark_material.clone()
-            } else {
-                light_material.clone()
-            };
-            
-            commands.spawn((
-                Mesh3d(plane_mesh.clone()),
-                MeshMaterial3d(material),
-                Transform::from_translation(position),
-                Ground,
-            ));
-        }
-    }
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 30.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.5, 0.5, 0.5),
+            perceptual_roughness: 0.9,
+            metallic: 0.0,
+            ..default()
+        })),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+        Ground,
+    ));
 }
 
 pub fn draw_cursor(

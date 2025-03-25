@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.15.0"
+bevy-inspector-egui = "0.30.0"
 
 [workspace]
 resolver = "2"
