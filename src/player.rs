@@ -72,7 +72,7 @@ pub struct WishDirection(pub Vec3);
 #[derive(Component, Default)]
 struct WishSpeed(f32);
 
-fn spawn_player(
+pub fn spawn_player(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -91,6 +91,7 @@ fn spawn_player(
         Velocity::default(),
         WishDirection::default(),
         WishSpeed::default(),
+        
     ));
 }
 
