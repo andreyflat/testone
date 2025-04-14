@@ -1,10 +1,11 @@
 use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
 use crate::player::{Player, WishDirection};
 
 pub struct WorldPlugin;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_floor);
+        app.add_systems(Startup,(spawn_floor, spawn_collision_cube));
     }
 }
 
@@ -97,3 +98,26 @@ pub fn draw_cursor(
         }
     }
 }
+
+pub fn spawn_collision_cube(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(2.0, 2.0, 2.0).mesh())),
+        MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.2, 0.3, 0.8),
+                perceptual_roughness: 0.5,
+                metallic: 0.5,
+                ..default()
+            })),
+            Transform::from_translation(Vec3::new(5.0, 0.1, 5.0)),
+            Visibility::default(),
+            InheritedVisibility::default(),
+            ViewVisibility::default(),
+            RigidBody::Fixed,
+            Collider::cuboid(1.0, 1.0, 1.0),
+    ));
+}
+

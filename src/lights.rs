@@ -16,7 +16,7 @@ fn spawn_directional_light(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
-            illuminance: 5000.0,
+            illuminance: 50.0,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 0.6,
             ..default()

@@ -9,6 +9,7 @@ mod player;
 mod camera;
 mod world;
 
+use bevy_rapier3d::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use player::{PlayerPlugin, update_position};
 use camera::{CameraPlugin, follow_camera};
@@ -29,6 +30,12 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins((
+            RapierDebugRenderPlugin::default(),
+        ))
+        .add_plugins((
+            RapierPhysicsPlugin::<NoUserData>::default(),
+        ))
         .add_plugins(WorldInspectorPlugin::new())
         .add_plugins((
             LogDiagnosticsPlugin::default(),
