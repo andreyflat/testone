@@ -17,7 +17,7 @@ fn spawn_floor(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
+    let entity = commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 30.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.5, 0.5, 0.5),
@@ -27,7 +27,15 @@ fn spawn_floor(
         })),
         Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
         Ground,
-    ));
+    )).id();
+    
+    // Добавляем физическую коллизию для земли
+    commands.entity(entity).insert(RigidBody::Fixed);
+    commands.entity(entity).insert(Collider::cuboid(15.0, 0.01, 15.0)); // Полуразмеры коллайдера
+    commands.entity(entity).insert(Friction {
+        coefficient: 0.25,
+        combine_rule: CoefficientCombineRule::Average,
+    });
 }
 
 pub fn draw_cursor(
@@ -112,7 +120,7 @@ pub fn spawn_collision_cube(
                 metallic: 0.5,
                 ..default()
             })),
-            Transform::from_translation(Vec3::new(5.0, 0.1, 5.0)),
+            Transform::from_translation(Vec3::new(5.0, 1.0, 5.0)),
             Visibility::default(),
             InheritedVisibility::default(),
             ViewVisibility::default(),
