@@ -1,10 +1,11 @@
 use bevy::prelude::*;
-use crate::player::Player;
+use crate::player::{Player, PlayerCamera};
 
 pub struct CameraPlugin;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera);
+        app.add_systems(Startup, spawn_camera)
+           .add_systems(Update, follow_camera);
     }
 }
 
@@ -12,6 +13,8 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Camera {
+            order: 0,
+            hdr: true,
             ..default()
         },
         Transform::from_xyz(0.0, 5.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -20,6 +23,10 @@ fn spawn_camera(mut commands: Commands) {
             height: 5.0,
             lerp_speed: 5.0,
         },
+        PlayerCamera,
+        Visibility::default(),
+        InheritedVisibility::default(),
+        ViewVisibility::default(),
     ));
 }
 

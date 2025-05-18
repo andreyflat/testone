@@ -1,11 +1,12 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
-use crate::player::{Player, WishDirection};
+use crate::player::{Player, WishDirection, PlayerCamera};
 
 pub struct WorldPlugin;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup,(spawn_floor, spawn_collision_cube));
+        app.add_systems(Startup, (spawn_floor, spawn_collision_cube, spawn_light))
+           .add_systems(Update, draw_cursor);
     }
 }
 
@@ -20,7 +21,7 @@ fn spawn_floor(
     let entity = commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 30.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.5, 0.5, 0.5),
+            base_color: Color::srgb(0.1, 0.1, 0.1),
             perceptual_roughness: 0.9,
             metallic: 0.0,
             ..default()
@@ -31,7 +32,7 @@ fn spawn_floor(
     
     // Добавляем физическую коллизию для земли
     commands.entity(entity).insert(RigidBody::Fixed);
-    commands.entity(entity).insert(Collider::cuboid(15.0, 0.01, 15.0)); // Полуразмеры коллайдера
+    commands.entity(entity).insert(Collider::cuboid(15.0, 0.1, 15.0)); // Полуразмеры коллайдера
     commands.entity(entity).insert(Friction {
         coefficient: 0.25,
         combine_rule: CoefficientCombineRule::Average,
@@ -39,7 +40,7 @@ fn spawn_floor(
 }
 
 pub fn draw_cursor(
-    camera_query: Query<(&Camera, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<PlayerCamera>>,
     ground: Query<&GlobalTransform, With<Ground>>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
@@ -126,6 +127,20 @@ pub fn spawn_collision_cube(
             ViewVisibility::default(),
             RigidBody::Fixed,
             Collider::cuboid(1.0, 1.0, 1.0),
+    ));
+}
+
+fn spawn_light(mut commands: Commands) {
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 10000.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Visibility::default(),
+        InheritedVisibility::default(),
+        ViewVisibility::default(),
     ));
 }
 

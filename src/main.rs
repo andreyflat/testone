@@ -11,9 +11,9 @@ mod world;
 
 use bevy_rapier3d::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
-use player::{PlayerPlugin, update_position};
-use camera::{CameraPlugin, follow_camera};
-use world::{WorldPlugin, draw_cursor};
+use player::PlayerPlugin;
+use camera::CameraPlugin;
+use world::WorldPlugin;
 use lights::LightsPlugin;
 
 fn main() {
@@ -32,8 +32,6 @@ fn main() {
         }))
         .add_plugins((
             RapierDebugRenderPlugin::default(),
-        ))
-        .add_plugins((
             RapierPhysicsPlugin::<NoUserData>::default(),
         ))
         .add_plugins(WorldInspectorPlugin::new())
@@ -42,11 +40,7 @@ fn main() {
             FrameTimeDiagnosticsPlugin,
         ))
         .add_systems(Startup, setup)
-        .add_systems(Update, (
-            draw_cursor.after(update_position),
-            follow_camera.after(update_position),
-            check_exit,
-        ).chain())
+        .add_systems(Update, check_exit)
         .run();
 }
 
