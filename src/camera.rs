@@ -1,3 +1,4 @@
+// src/camera.rs - Восстановленная оригинальная камера
 use bevy::prelude::*;
 use crate::player::{Player, PlayerCamera};
 
@@ -24,16 +25,13 @@ fn spawn_camera(mut commands: Commands) {
             lerp_speed: 5.0,
         },
         PlayerCamera,
-        Visibility::default(),
-        InheritedVisibility::default(),
-        ViewVisibility::default(),
     ));
 }
 
 #[derive(Component)]
 pub struct FollowCamera {
-    distance: f32,       // Расстояние от камеры до куба (по оси Z)
-    height: f32,         // Высота камеры над кубом
+    distance: f32,       // Расстояние от камеры до игрока (по оси Z)
+    height: f32,         // Высота камеры над игроком
     lerp_speed: f32,     // Скорость интерполяции
 }
 
@@ -47,7 +45,7 @@ pub fn follow_camera(
     };
     
     for (mut camera_transform, follow) in camera_query.iter_mut() {
-        // Используем только горизонтальные координаты куба,
+        // Используем только горизонтальные координаты игрока,
         // игнорируем вертикальную составляющую (прыжки)
         let player_position_horizontal = Vec3::new(
             player_transform.translation.x,

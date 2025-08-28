@@ -1,14 +1,16 @@
+// src/lights.rs - Исправленная версия
 use bevy::{
     prelude::*,
     pbr::CascadeShadowConfig,
 };
 
-use crate::player::{Player, spawn_player};
+use crate::player::Player;
 
 pub struct LightsPlugin;
 impl Plugin for LightsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_directional_light, spawn_spotlight.after(spawn_player)));
+        app.add_systems(Startup, spawn_directional_light)
+           .add_systems(Update, spawn_spotlight);
     }
 }
 
@@ -31,17 +33,21 @@ fn spawn_directional_light(mut commands: Commands) {
     ));
 }
 
-fn spawn_spotlight(mut commands: Commands, player_query: Query<Entity, With<Player>>) {
-    let player = player_query.single();
-    commands.entity(player).with_children(|commands| {
-    commands.spawn((
+fn spawn_spotlight(
+    mut commands: Commands, 
+    player_query: Query<Entity, (With<Player>, Without<SpotLight>)>
+) {
+    for player_entity in player_query.iter() {
+        commands.entity(player_entity).with_children(|commands| {
+            commands.spawn((
                 SpotLight {
-            intensity: 100000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::default(),
-        Name::new("Flash Light")
-        ));
-    });
+                    intensity: 100000.0,
+                    shadows_enabled: true,
+                    ..default()
+                },
+                Transform::default(),
+                Name::new("Flash Light")
+            ));
+        });
+    }
 }

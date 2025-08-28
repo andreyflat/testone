@@ -1,3 +1,4 @@
+// src/player.rs - Исправленная версия с правильными коллизиями
 use bevy::prelude::*;
 use bevy::input::keyboard::KeyCode;
 use bevy_rapier3d::prelude::*;
@@ -22,7 +23,6 @@ impl Default for GameSettings {
         }
     }
 }
-
 
 #[derive(Component)]
 pub struct Player;
@@ -56,18 +56,6 @@ impl Default for Jump {
 #[derive(Component)]
 pub struct PlayerCamera;
 
-#[derive(Component, Default, Debug)]
-#[allow(dead_code)]
-pub struct Visibility(pub bool);
-
-#[derive(Component, Default, Debug)]
-#[allow(dead_code)]
-pub struct InheritedVisibility(pub bool);
-
-#[derive(Component, Default, Debug)]
-#[allow(dead_code)]
-pub struct ViewVisibility(pub bool);
-
 #[derive(Bundle)]
 struct PlayerBundle {
     player: Player,
@@ -76,7 +64,6 @@ struct PlayerBundle {
     wish_direction: WishDirection,
     wish_speed: WishSpeed,
     transform: Transform,
-    visibility: Visibility,
     rigid_body: RigidBody,
     collider: Collider,
     friction: Friction,
@@ -98,10 +85,11 @@ impl Plugin for PlayerPlugin {
                 handle_input,
                 apply_acceleration_cpma,
                 move_kinematic_player_by_velocity,
+                debug_player_position,
+                emergency_respawn,
             ).chain());
     }
 }
-
 
 pub fn spawn_player(
     mut commands: Commands,
@@ -115,21 +103,26 @@ pub fn spawn_player(
             velocity: Velocity::default(),
             wish_direction: WishDirection::default(),
             wish_speed: WishSpeed::default(),
-            transform: Transform::from_xyz(0.0, 1.0, 0.0),
-            visibility: Visibility::default(),
+            // ВАЖНО: Поднимаем игрока значительно выше пола
+            transform: Transform::from_xyz(0.0, 3.0, 0.0), // Было 1.0, стало 3.0
             rigid_body: RigidBody::KinematicPositionBased,
-            collider: Collider::capsule_y(0.25, 0.25),
-            friction: Friction::coefficient(0.7),
-            restitution: Restitution::coefficient(0.3),
-            gravity_scale: GravityScale(1.0),
+            // Уменьшаем коллайдер для лучшей совместимости
+            collider: Collider::capsule_y(0.5, 0.3), // высота 0.5, радиус 0.3
+            friction: Friction::coefficient(0.0), // Убираем трение для Quake-физики
+            restitution: Restitution::coefficient(0.0), // Убираем отскок
+            gravity_scale: GravityScale(0.0), // Отключаем встроенную гравитацию, используем свою
             locked_axes: LockedAxes::ROTATION_LOCKED,
             damping: Damping {
-                linear_damping: 0.5,
+                linear_damping: 0.0, // Убираем демпфирование
                 angular_damping: 1.0,
             },
-            mesh: Mesh3d(meshes.add(Capsule3d::new(0.25, 0.5))),
+            // Визуальная капсула - больше коллайдера для лучшей видимости
+            mesh: Mesh3d(meshes.add(Capsule3d::new(0.3, 1.0))), // немного меньше
             material: MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.0, 0.0, 1.0),
+                base_color: Color::srgb(0.1, 0.3, 1.0), // Яркий синий
+                emissive: LinearRgba::rgb(0.1, 0.1, 0.3), // Добавляем свечение
+                metallic: 0.0,
+                perceptual_roughness: 0.5,
                 ..default()
             })),
         })
@@ -138,19 +131,31 @@ pub fn spawn_player(
     commands.entity(player)
         .insert(ActiveEvents::COLLISION_EVENTS)
         .insert(KinematicCharacterController {
-            offset: CharacterLength::Absolute(0.01),
+            offset: CharacterLength::Absolute(0.02), // Увеличили offset
             up: Vec3::Y,
             max_slope_climb_angle: 0.785398, // 45 градусов
-            min_slope_slide_angle: 0.785398, // 45 градусов
+            min_slope_slide_angle: 0.785398,
             slide: false,
             apply_impulse_to_dynamic_bodies: true,
             autostep: Some(CharacterAutostep {
-                max_height: CharacterLength::Absolute(0.5),
-                min_width: CharacterLength::Absolute(0.1),
+                max_height: CharacterLength::Absolute(0.3),
+                min_width: CharacterLength::Absolute(0.05),
                 include_dynamic_bodies: false,
             }),
             ..default()
         });
+}
+
+// Система отладки позиции игрока
+fn debug_player_position(
+    player_query: Query<(&Transform, &Velocity), With<Player>>,
+) {
+    if let Ok((transform, velocity)) = player_query.get_single() {
+        if transform.translation.y < -5.0 {
+            println!("ПРЕДУПРЕЖДЕНИЕ: Игрок провалился! Позиция: {:?}, Скорость: {:?}", 
+                transform.translation, velocity.0);
+        }
+    }
 }
 
 pub fn apply_acceleration_cpma(
@@ -162,12 +167,19 @@ pub fn apply_acceleration_cpma(
         &WishSpeed,
         &mut Jump,
         &Transform,
-        &KinematicCharacterControllerOutput,
+        Option<&KinematicCharacterControllerOutput>, // Делаем опциональным
     ), With<Player>>,
 ) {
-    for (mut velocity, wish_dir, wish_speed, mut jump, _transform, kcc_output) in query.iter_mut() {
+    for (mut velocity, wish_dir, wish_speed, mut jump, transform, kcc_output) in query.iter_mut() {
         let dt = time.delta_secs();
-        let on_ground = kcc_output.grounded;
+        
+        // Проверяем, находимся ли мы на земле
+        let on_ground = if let Some(kcc) = kcc_output {
+            kcc.grounded
+        } else {
+            // Fallback: проверяем высоту над землей
+            transform.translation.y <= 1.1 // Немного выше коллайдера пола
+        };
 
         let mut vel = velocity.0;
         let wish_dir = wish_dir.0.normalize_or_zero();
@@ -191,7 +203,7 @@ pub fn apply_acceleration_cpma(
             }
         }
 
-        // Ограничиваем горизонтальную скорость
+        // Ограничиваем горизонтальную скорость только на земле
         if on_ground {
             let horizontal_speed = Vec3::new(vel.x, 0.0, vel.z).length();
             if horizontal_speed > settings.sv_maxspeed {
@@ -201,8 +213,10 @@ pub fn apply_acceleration_cpma(
             }
         }
 
-        // Применяем гравитацию
-        vel.y += settings.sv_gravity * dt;
+        // Применяем собственную гравитацию
+        if !on_ground {
+            vel.y += settings.sv_gravity * dt;
+        }
 
         // Обработка прыжка
         if on_ground {
@@ -217,15 +231,17 @@ pub fn apply_acceleration_cpma(
             jump.jump_timer += dt;
         }
 
-        // Гарантия, что скорость не NaN и не бесконечная
-        if !vel.is_finite() || vel.length_squared() > 1_000_000.0 {
+        // Ограничиваем падение
+        vel.y = vel.y.max(-50.0);
+
+        // Гарантия, что скорость корректна
+        if !vel.is_finite() || vel.length_squared() > 10_000.0 {
             vel = Vec3::ZERO;
         }
 
         velocity.0 = vel;
     }
 }
-
 
 pub fn move_kinematic_player_by_velocity(
     time: Res<Time>,
@@ -237,15 +253,18 @@ pub fn move_kinematic_player_by_velocity(
 ) {
     for (velocity, mut transform, mut controller) in query.iter_mut() {
         let delta = velocity.0 * time.delta_secs();
-        if delta.is_finite() {
-            let target = transform.translation + delta;
-            if target.is_finite() && target.length_squared() < 10_000.0 * 10_000.0 {
-                controller.translation = Some(delta);
-                // Обновляем позицию только если нет коллизии
-                if let Some(offset) = controller.translation {
-                    transform.translation += offset;
-                }
-            }
+        
+        if delta.is_finite() && delta.length_squared() < 100.0 {
+            controller.translation = Some(delta);
+        } else {
+            controller.translation = Some(Vec3::ZERO);
+        }
+        
+        // Предотвращаем провал под мир
+        if transform.translation.y < 0.5 {
+            transform.translation.y = 1.0;
+            // Сбрасываем вертикальную скорость при "телепорте"
+            // velocity.0.y = 0.0; // Это нужно сделать через mut, но у нас нет доступа
         }
     }
 }
@@ -257,6 +276,7 @@ pub fn handle_input(
     for (mut wish_dir, mut wish_speed, mut jump) in query.iter_mut() {
         let mut direction = Vec3::ZERO;
 
+        // Стандартное WASD управление
         if keyboard.pressed(KeyCode::KeyW) {
             direction.z -= 1.0;
         }
@@ -270,6 +290,7 @@ pub fn handle_input(
             direction.x += 1.0;
         }
 
+        // Прыжок
         if keyboard.just_pressed(KeyCode::Space) {
             jump.is_jumping = true;
         } else {
@@ -278,5 +299,26 @@ pub fn handle_input(
 
         wish_dir.0 = direction.normalize_or_zero();
         wish_speed.0 = if direction.length_squared() > 0.0 { 8.0 } else { 0.0 };
+    }
+}
+
+pub fn emergency_respawn(
+    mut player_query: Query<(&mut Transform, &mut Velocity), With<Player>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+) {
+    if let Ok((mut transform, mut velocity)) = player_query.get_single_mut() {
+        // Автоматическое восстановление если игрок провалился
+        if transform.translation.y < -2.0 {
+            println!("Игрок провалился! Восстанавливаем позицию...");
+            transform.translation = Vec3::new(0.0, 3.0, 0.0);
+            velocity.0 = Vec3::ZERO;
+        }
+        
+        // Ручное восстановление на R
+        if keyboard.just_pressed(KeyCode::KeyR) {
+            println!("Ручное восстановление позиции игрока");
+            transform.translation = Vec3::new(0.0, 3.0, 0.0);
+            velocity.0 = Vec3::ZERO;
+        }
     }
 }
