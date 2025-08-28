@@ -1,3 +1,4 @@
+// src/world.rs - Восстановленная версия с поворотом игрока к курсору
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 use crate::player::{Player, WishDirection, PlayerCamera};
@@ -5,7 +6,7 @@ use crate::player::{Player, WishDirection, PlayerCamera};
 pub struct WorldPlugin;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_floor, spawn_collision_cube, spawn_light))
+        app.add_systems(Startup, (spawn_floor, spawn_collision_cube))
            .add_systems(Update, draw_cursor);
     }
 }
@@ -19,9 +20,9 @@ fn spawn_floor(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let entity = commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 30.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))), // Увеличили арену
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.1, 0.1, 0.1),
+            base_color: Color::srgb(0.5, 0.5, 0.5),
             perceptual_roughness: 0.9,
             metallic: 0.0,
             ..default()
@@ -31,12 +32,19 @@ fn spawn_floor(
     )).id();
     
     // Добавляем физическую коллизию для земли
-    commands.entity(entity).insert(RigidBody::Fixed);
-    commands.entity(entity).insert(Collider::cuboid(15.0, 0.5, 15.0)); // Полуразмеры коллайдера
-    commands.entity(entity).insert(Friction {
-        coefficient: 0.25,
-        combine_rule: CoefficientCombineRule::Average,
-    });
+    commands.entity(entity).insert((
+        RigidBody::Fixed,
+        // Коллайдер пола - тонкий прямоугольник
+        Collider::cuboid(25.0, 0.1, 25.0), // width, height/2, depth
+        Friction {
+            coefficient: 0.0, // Убираем трение для Quake-физики
+            combine_rule: CoefficientCombineRule::Min,
+        },
+        Restitution {
+            coefficient: 0.0, // Никакого отскока
+            combine_rule: CoefficientCombineRule::Min,
+        },
+    ));
 }
 
 pub fn draw_cursor(
@@ -113,34 +121,28 @@ pub fn spawn_collision_cube(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(2.0, 2.0, 2.0).mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
+    // Добавляем несколько препятствий на арене
+    let obstacles = vec![
+        Vec3::new(8.0, 1.0, 8.0),
+        Vec3::new(-8.0, 1.0, 8.0),
+        Vec3::new(8.0, 1.0, -8.0),
+        Vec3::new(-8.0, 1.0, -8.0),
+        Vec3::new(0.0, 1.0, 10.0),
+        Vec3::new(0.0, 1.0, -10.0),
+    ];
+    
+    for pos in obstacles {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(2.0, 2.0, 2.0).mesh())),
+            MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgb(0.2, 0.3, 0.8),
                 perceptual_roughness: 0.5,
                 metallic: 0.5,
                 ..default()
             })),
-            Transform::from_translation(Vec3::new(5.0, 1.0, 5.0)),
-            Visibility::default(),
-            InheritedVisibility::default(),
-            ViewVisibility::default(),
+            Transform::from_translation(pos),
             RigidBody::Fixed,
             Collider::cuboid(1.0, 1.0, 1.0),
-    ));
+        ));
+    }
 }
-
-fn spawn_light(mut commands: Commands) {
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-        Visibility::default(),
-        InheritedVisibility::default(),
-        ViewVisibility::default(),
-    ));
-}
-
