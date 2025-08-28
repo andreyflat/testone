@@ -32,7 +32,7 @@ fn spawn_floor(
     
     // Добавляем физическую коллизию для земли
     commands.entity(entity).insert(RigidBody::Fixed);
-    commands.entity(entity).insert(Collider::cuboid(15.0, 0.1, 15.0)); // Полуразмеры коллайдера
+    commands.entity(entity).insert(Collider::cuboid(15.0, 0.5, 15.0)); // Полуразмеры коллайдера
     commands.entity(entity).insert(Friction {
         coefficient: 0.25,
         combine_rule: CoefficientCombineRule::Average,

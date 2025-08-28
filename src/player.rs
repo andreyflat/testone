@@ -115,7 +115,7 @@ pub fn spawn_player(
             velocity: Velocity::default(),
             wish_direction: WishDirection::default(),
             wish_speed: WishSpeed::default(),
-            transform: Transform::from_xyz(0.0, 2.0, 0.0),
+            transform: Transform::from_xyz(0.0, 1.0, 0.0),
             visibility: Visibility::default(),
             rigid_body: RigidBody::KinematicPositionBased,
             collider: Collider::capsule_y(0.25, 0.25),
@@ -142,10 +142,10 @@ pub fn spawn_player(
             up: Vec3::Y,
             max_slope_climb_angle: 0.785398, // 45 градусов
             min_slope_slide_angle: 0.785398, // 45 градусов
-            slide: true,
+            slide: false,
             apply_impulse_to_dynamic_bodies: true,
             autostep: Some(CharacterAutostep {
-                max_height: CharacterLength::Absolute(0.3),
+                max_height: CharacterLength::Absolute(0.5),
                 min_width: CharacterLength::Absolute(0.1),
                 include_dynamic_bodies: false,
             }),
