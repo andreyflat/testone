@@ -77,6 +77,7 @@ pub fn spawn_enemy(
         
         // Физика
         RigidBody::Dynamic,
+        Velocity::default(),
         Collider::cuboid(0.5, 0.5, 0.5),
         LockedAxes::ROTATION_LOCKED, // Не позволяем врагу вращаться
         
@@ -92,10 +93,9 @@ pub fn spawn_enemy(
 }
 
 fn enemy_ai_system(
-    time: Res<Time>,
     player_query: Query<Entity, With<Player>>,
     player_transform_query: Query<&Transform, With<Player>>,
-    mut enemy_query: Query<(&mut Transform, &mut Enemy), (Without<Player>, With<Enemy>)>,
+    mut enemy_query: Query<(&Transform, &mut Enemy, &mut Velocity), (Without<Player>, With<Enemy>)>,
 ) {
     let Ok(player_entity) = player_query.get_single() else {
         return;
@@ -105,21 +105,25 @@ fn enemy_ai_system(
         return;
     };
     
-    for (mut enemy_transform, mut enemy) in enemy_query.iter_mut() {
+    for (enemy_transform, mut enemy, mut velocity) in enemy_query.iter_mut() {
         // Устанавливаем цель (игрока)
         enemy.target = Some(player_entity);
         
         // Вычисляем направление к игроку
-        let direction = (player_transform.translation - enemy_transform.translation).normalize();
-        
-        // Двигаемся к игроку (только по X и Z, игнорируем Y)
-        let movement = Vec3::new(
-            direction.x * enemy.speed * time.delta_secs(),
+        let direction = (player_transform.translation - enemy_transform.translation).normalize_or_zero();
+
+        velocity.linvel = Vec3::new(
+            direction.x * enemy.speed,
             0.0,
-            direction.z * enemy.speed * time.delta_secs(),
+            direction.z * enemy.speed,
         );
-        
-        enemy_transform.translation += movement;
+        // Двигаемся к игроку (только по X и Z, игнорируем Y)
+        //let movement = Vec3::new(
+        //    direction.x * enemy.speed * time.delta_secs(),
+        //    0.0,
+        //    direction.z * enemy.speed * time.delta_secs(),
+        //);
+                //enemy_transform.translation += movement;
     }
 }
 
