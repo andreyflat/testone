@@ -1,4 +1,3 @@
-// src/lights.rs - Исправленная версия
 use bevy::{
     prelude::*,
     pbr::CascadeShadowConfig,
@@ -14,11 +13,15 @@ impl Plugin for LightsPlugin {
     }
 }
 
+// 1. Создаем компонент-маркер "Фонарик выдан"
+#[derive(Component)]
+struct FlashlightEquipped; 
+
 fn spawn_directional_light(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
-            illuminance: 50.0,
+            illuminance: 15000.0, // Примечание: 50.0 люкс для солнца маловато, обычно ~10000+
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 0.6,
             ..default()
@@ -35,19 +38,27 @@ fn spawn_directional_light(mut commands: Commands) {
 
 fn spawn_spotlight(
     mut commands: Commands, 
-    player_query: Query<Entity, (With<Player>, Without<SpotLight>)>
+    // 2. Ищем игрока БЕЗ маркера FlashlightEquipped
+    player_query: Query<Entity, (With<Player>, Without<FlashlightEquipped>)>
 ) {
     for player_entity in player_query.iter() {
-        commands.entity(player_entity).with_children(|commands| {
-            commands.spawn((
-                SpotLight {
-                    intensity: 100000.0,
-                    shadows_enabled: true,
-                    ..default()
-                },
-                Transform::default(),
-                Name::new("Flash Light")
-            ));
-        });
+        commands.entity(player_entity)
+            // 3. Сразу вешаем маркер на игрока, чтобы в следующем кадре Query его не нашел
+            .insert(FlashlightEquipped) 
+            .with_children(|parent| {
+                parent.spawn((
+                    SpotLight {
+                        intensity: 100000.0, // Для фонарика это очень ярко, возможно стоит уменьшить до ~1000-5000
+                        shadows_enabled: true,
+                        range: 20.0, // Ограничьте дальность, чтобы не грузить рендер
+                        outer_angle: 0.6,
+                        ..default()
+                    },
+                    Transform::from_xyz(0.2, 0.5, -0.5), // Смещение относительно игрока
+                    Name::new("Flash Light")
+                ));
+            });
+            
+        info!("Flashlight spawned for player!"); // В логе должно появиться только ОДИН раз
     }
 }
