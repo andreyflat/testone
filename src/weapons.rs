@@ -33,7 +33,7 @@ impl Default for Weapon {
 
 #[derive(Component)]
 pub struct Bullet {
-    pub velocity: Vec3,
+    //pub velocity: Vec3,
     pub damage: f32,
     pub lifetime: f32,
 }
@@ -96,27 +96,34 @@ fn spawn_bullet(
         })),
         Transform::from_translation(position),
         Bullet {
-            velocity: direction * bullet_speed,
+            //velocity: direction * bullet_speed,
             damage,
             lifetime: 2.0, // пуля живет 2 секунды
         },
         RigidBody::Dynamic,
         Collider::ball(0.15),
         Sensor, // пуля проходит сквозь объекты, но регистрирует столкновения
+        Velocity {
+            linvel: direction * bullet_speed,
+            angvel: Vec3::ZERO,
+        },
         Name::new("Bullet"),
     ));
 }
 
 fn update_bullets(
     time: Res<Time>,
-    mut bullet_query: Query<(&mut Transform, &mut Bullet)>,
+    mut bullet_query: Query<(Entity, &mut Bullet)>,
+    mut commands: Commands,
 ) {
-    for (mut transform, mut bullet) in bullet_query.iter_mut() {
+    for (entity, mut bullet) in bullet_query.iter_mut() {
         // Двигаем пулю
-        transform.translation += bullet.velocity * time.delta_secs();
-        
+        //transform.translation += bullet.velocity * time.delta_secs();
         // Уменьшаем время жизни
         bullet.lifetime -= time.delta_secs();
+        if bullet.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
