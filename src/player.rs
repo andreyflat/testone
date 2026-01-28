@@ -83,10 +83,12 @@ impl Plugin for PlayerPlugin {
             .add_systems(Startup, spawn_player)
             .add_systems(Update, (
                 handle_input,
-                apply_acceleration_cpma,
-                move_kinematic_player_by_velocity,
                 debug_player_position,
                 emergency_respawn,
+            ))
+            .add_systems(FixedUpdate, (
+                    apply_acceleration_cpma,
+                    move_kinematic_player_by_velocity,
             ).chain());
     }
 }
