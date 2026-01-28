@@ -21,7 +21,7 @@ fn spawn_directional_light(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
-            illuminance: 15000.0, // Примечание: 50.0 люкс для солнца маловато, обычно ~10000+
+            illuminance: 50.0, // Примечание: 50.0 люкс для солнца маловато, обычно ~10000+
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 0.6,
             ..default()
@@ -50,7 +50,7 @@ fn spawn_spotlight(
                     SpotLight {
                         intensity: 100000.0, // Для фонарика это очень ярко, возможно стоит уменьшить до ~1000-5000
                         shadows_enabled: true,
-                        range: 20.0, // Ограничьте дальность, чтобы не грузить рендер
+                        range: 150.0, // Ограничьте дальность, чтобы не грузить рендер
                         outer_angle: 0.6,
                         ..default()
                     },
