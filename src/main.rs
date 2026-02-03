@@ -1,7 +1,7 @@
 // src/main.rs - Обновленный main с новыми системами
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, 
-    prelude::*, 
+    prelude::*,
     window::{PresentMode, WindowMode}
 };
 
