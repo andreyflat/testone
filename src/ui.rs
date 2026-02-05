@@ -16,7 +16,7 @@ impl Plugin for UIPlugin {
     }
 }
 
-#[derive(Component)]
+#[derrive(Component)]
 struct HealthBar;
 
 #[derive(Component)]
@@ -145,7 +145,7 @@ fn player_enemy_collision(
     };
     
     for collision_event in collision_events.read() {
-        if let CollisionEvent::Started(entity1, entity2, _) = collision_event {
+        if let CollisionEvent::Stopped(entity1, entity2, _) = collision_event {
             let enemy_entity = if *entity1 == player_entity && enemy_query.contains(*entity2) {
                 Some(*entity2)
             } else if *entity2 == player_entity && enemy_query.contains(*entity1) {
