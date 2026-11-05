@@ -44,7 +44,7 @@ fn main() {
         //.add_plugins(WorldInspectorPlugin::new())
         .add_plugins((
             LogDiagnosticsPlugin::default(),
-            FrameTimeDiagnosticsPlugin,
+            FrameTimeDiagnosticsPlugin::default(),
         ))
         .add_systems(Startup, setup)
         .add_systems(Update, (
@@ -60,9 +60,9 @@ fn setup() {
 
 fn check_exit(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut app_exit_events: EventWriter<AppExit>,
+    mut app_exit_events: MessageWriter<AppExit>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Escape) {
-        app_exit_events.send(AppExit::default());
+        app_exit_events.write(AppExit::default());
     }
 }

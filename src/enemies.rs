@@ -97,11 +97,11 @@ fn enemy_ai_system(
     player_transform_query: Query<&Transform, With<Player>>,
     mut enemy_query: Query<(&Transform, &mut Enemy, &mut Velocity), (Without<Player>, With<Enemy>)>,
 ) {
-    let Ok(player_entity) = player_query.get_single() else {
+    let Ok(player_entity) = player_query.single() else {
         return;
     };
-    
-    let Ok(player_transform) = player_transform_query.get_single() else {
+
+    let Ok(player_transform) = player_transform_query.single() else {
         return;
     };
     
@@ -112,7 +112,7 @@ fn enemy_ai_system(
         // Вычисляем направление к игроку
         let direction = (player_transform.translation - enemy_transform.translation).normalize_or_zero();
 
-        velocity.linvel = Vec3::new(
+        velocity.linear = Vec3::new(
             direction.x * enemy.speed,
             0.0,
             direction.z * enemy.speed,
@@ -129,7 +129,7 @@ fn enemy_ai_system(
 
 fn bullet_enemy_collision(
     mut commands: Commands,
-    mut collision_events: EventReader<CollisionEvent>,
+    mut collision_events: MessageReader<CollisionEvent>,
     bullet_query: Query<&Bullet>,
     mut enemy_query: Query<&mut Health, With<Enemy>>,
 ) {

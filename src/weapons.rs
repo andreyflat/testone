@@ -46,7 +46,7 @@ pub fn handle_shooting(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let Ok((player_transform, mut weapon)) = player_query.get_single_mut() else {
+    let Ok((player_transform, mut weapon)) = player_query.single_mut() else {
         return;
     };
 
@@ -104,8 +104,8 @@ fn spawn_bullet(
         Collider::ball(0.15),
         Sensor, // пуля проходит сквозь объекты, но регистрирует столкновения
         Velocity {
-            linvel: direction * bullet_speed,
-            angvel: Vec3::ZERO,
+            linear: direction * bullet_speed,
+            angular: Vec3::ZERO,
         },
         Name::new("Bullet"),
     ));

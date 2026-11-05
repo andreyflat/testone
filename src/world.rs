@@ -54,14 +54,19 @@ pub fn draw_cursor(
     mut gizmos: Gizmos,
     mut player_query: Query<(&mut Transform, &WishDirection), With<Player>>,
 ) {
-    let (camera, camera_transform) = camera_query.single();
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
     let ground_transform = if let Some(transform) = ground.iter().next() {
         transform
     } else {
         return;
     };
 
-    let Some(cursor_position) = windows.single().cursor_position() else {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor_position) = window.cursor_position() else {
         return;
     };
 
@@ -90,7 +95,7 @@ pub fn draw_cursor(
     );
 
     // Поворачиваем игрока в направлении точки пересечения
-    if let Ok((mut player_transform, wish_dir)) = player_query.get_single_mut() {
+    if let Ok((mut player_transform, wish_dir)) = player_query.single_mut() {
         let target_point = point;
         let current_pos = player_transform.translation;
         

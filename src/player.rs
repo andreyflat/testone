@@ -152,7 +152,7 @@ pub fn spawn_player(
 fn debug_player_position(
     player_query: Query<(&Transform, &Velocity), With<Player>>,
 ) {
-    if let Ok((transform, velocity)) = player_query.get_single() {
+    if let Ok((transform, velocity)) = player_query.single() {
         if transform.translation.y < -5.0 {
             println!("ПРЕДУПРЕЖДЕНИЕ: Игрок провалился! Позиция: {:?}, Скорость: {:?}", 
                 transform.translation, velocity.0);
@@ -308,7 +308,7 @@ pub fn emergency_respawn(
     mut player_query: Query<(&mut Transform, &mut Velocity), With<Player>>,
     keyboard: Res<ButtonInput<KeyCode>>,
 ) {
-    if let Ok((mut transform, mut velocity)) = player_query.get_single_mut() {
+    if let Ok((mut transform, mut velocity)) = player_query.single_mut() {
         // Автоматическое восстановление если игрок провалился
         if transform.translation.y < -2.0 {
             println!("Игрок провалился! Восстанавливаем позицию...");

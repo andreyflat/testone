@@ -1,6 +1,6 @@
 use bevy::{
     prelude::*,
-    pbr::CascadeShadowConfig,
+    light::CascadeShadowConfig,
 };
 
 use crate::player::Player;
@@ -20,7 +20,7 @@ struct FlashlightEquipped;
 fn spawn_directional_light(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             illuminance: 50.0, // Примечание: 50.0 люкс для солнца маловато, обычно ~10000+
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 0.6,
@@ -49,7 +49,7 @@ fn spawn_spotlight(
                 parent.spawn((
                     SpotLight {
                         intensity: 100000.0, // Для фонарика это очень ярко, возможно стоит уменьшить до ~1000-5000
-                        shadows_enabled: true,
+                        shadow_maps_enabled: true,
                         range: 150.0, // Ограничьте дальность, чтобы не грузить рендер
                         outer_angle: 0.6,
                         ..default()
