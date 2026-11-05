@@ -2,8 +2,13 @@
 use bevy::prelude::*;
 use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
-use crate::enemies::ENEMY_CENTER_Y;
 use crate::player::Player;
+
+/// Пуля вылетает ниже центра игрока: стоя на полу, он попадает точно в центр низкого врага.
+/// В прыжке пуля поднимается вместе с игроком и может пролететь над низкими врагами.
+const MUZZLE_OFFSET_Y: f32 = -0.32;
+/// Близко к игроку, иначе пуля появляется уже за врагом, стоящим вплотную.
+const MUZZLE_DISTANCE: f32 = 0.4;
 
 pub struct WeaponsPlugin;
 impl Plugin for WeaponsPlugin {
@@ -57,14 +62,14 @@ pub fn handle_shooting(
     let time_since_last_shot = current_time - weapon.last_shot_time;
     let can_shoot = time_since_last_shot >= (1.0 / weapon.fire_rate);
 
-    if mouse_input.pressed(MouseButton::Left) && can_shoot {
+    if mouse_input.just_pressed(MouseButton::Left) && can_shoot {
         // Стреляем в направлении "вперед" игрока
         // В Bevy forward направление это -Z (Vec3::NEG_Z)
         let forward_direction = player_transform.rotation * Vec3::NEG_Z;
         
-        // Пуля появляется перед игроком на высоте врагов: стрельба в прыжке тоже попадает
-        let mut spawn_position = player_transform.translation + forward_direction * 1.0;
-        spawn_position.y = ENEMY_CENTER_Y;
+        let spawn_position = player_transform.translation
+            + forward_direction * MUZZLE_DISTANCE
+            + Vec3::Y * MUZZLE_OFFSET_Y;
 
 
         // Один меш и материал на все пули: для трассировки это намного дешевле
@@ -114,7 +119,7 @@ fn spawn_bullet(
         RigidBody::Dynamic,
         GravityScale(0.0), // Пуля летит ровно по прицелу
         Collider::ball(0.15),
-        Sensor, // пуля проходит сквозь объекты, но регистрирует столкновения
+        Sensor, // Попадания обрабатывает bullet_collision: пуля исчезает при касании препятствия
         ActiveEvents::COLLISION_EVENTS,
         Velocity {
             linear: direction * bullet_speed,

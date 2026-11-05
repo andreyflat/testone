@@ -2,6 +2,7 @@
 use bevy::prelude::*;
 use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
+use crate::lights::raytraced;
 use crate::player::Player;
 use crate::weapons::Bullet;
 
@@ -13,6 +14,17 @@ pub const ENEMY_GROUP: Group = Group::GROUP_2;
 /// Высота центра врага над началом координат. На ней же летят пули.
 pub const ENEMY_CENTER_Y: f32 = 0.6;
 const ENEMY_HALF_SIZE: f32 = 0.5;
+/// Верх низкого врага и граница между этажами двухэтажного.
+const LOWER_FLOOR_TOP_Y: f32 = ENEMY_CENTER_Y + ENEMY_HALF_SIZE;
+const UPPER_FLOOR_TOP_Y: f32 = LOWER_FLOOR_TOP_Y + ENEMY_HALF_SIZE * 2.0;
+const ARMOR_HEALTH: f32 = 75.0;
+const TALL_ENEMY_SPEED_FACTOR: f32 = 0.7;
+
+// Обход препятствий: враг, который почти не сдвинулся за время проверки, шагает вбок
+const STUCK_CHECK_INTERVAL: f32 = 0.5;
+const STUCK_MOVED_FRACTION: f32 = 0.25;
+const SIDESTEP_DURATION: f32 = 1.0;
+const NEAR_PLAYER_DISTANCE: f32 = 1.5;
 const PLAYER_RADIUS: f32 = 0.3;
 const PLAYER_HALF_HEIGHT: f32 = 0.8;
 const CONTACT_DAMAGE: f32 = 10.0;
@@ -29,7 +41,7 @@ impl Plugin for EnemiesPlugin {
             .add_systems(Update, (
                 wave_system,
                 enemy_ai_system,
-                bullet_enemy_collision,
+                bullet_collision,
                 enemy_death_system,
                 enemy_contact_damage,
                 player_death_system,
@@ -56,6 +68,17 @@ impl Default for WaveState {
 pub struct Enemy {
     pub speed: f32,
     pub attack_cooldown: f32,
+    pub stuck_timer: f32,
+    pub last_position: Vec3,
+    pub sidestep_timer: f32,
+    pub sidestep_side: f32,
+}
+
+/// Верхний этаж двухэтажного врага. Пока броня цела, тело неуязвимо.
+#[derive(Component)]
+pub struct Armor {
+    pub current: f32,
+    pub plate: Entity,
 }
 
 #[derive(Component)]
@@ -104,43 +127,49 @@ fn wave_system(
     wave_state.delay = WAVE_DELAY;
     let wave = wave_state.wave;
     let count = 1 + wave * 2;
+    let tall_count = wave - 1; // С каждой следующей волной на один двухэтажный больше
     let speed = (2.5 + wave as f32 * 0.25).min(7.0);
-    info!("Волна {wave}: врагов {count}, скорость {speed:.2}");
+    info!("Волна {wave}: низких {count}, двухэтажных {tall_count}, скорость {speed:.2}");
 
     // Золотой угол равномерно раскладывает врагов по кольцу вокруг игрока
     const GOLDEN_ANGLE: f32 = 2.399_963;
-    for i in 0..count {
+    for i in 0..count + tall_count {
         let angle = (i + wave) as f32 * GOLDEN_ANGLE;
         let x = player.translation.x + angle.cos() * WAVE_SPAWN_RADIUS;
         let z = player.translation.z + angle.sin() * WAVE_SPAWN_RADIUS;
-        spawn_enemy(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            Vec3::new(
-                x.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
-                ENEMY_CENTER_Y,
-                z.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
-            ),
-            speed,
+        let position = Vec3::new(
+            x.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
+            ENEMY_CENTER_Y,
+            z.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
         );
+        if i < count {
+            commands.spawn(enemy_body(
+                &mut meshes,
+                &mut materials,
+                position,
+                speed,
+                Color::srgb(0.8, 0.2, 0.2),
+            ));
+        } else {
+            spawn_tall_enemy(&mut commands, &mut meshes, &mut materials, position, speed);
+        }
     }
 }
 
-pub fn spawn_enemy(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+/// Низкий враг и нижний этаж двухэтажного.
+fn enemy_body(
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
     position: Vec3,
     speed: f32,
-) {
-    let mesh = meshes.add(crate::lights::raytraced(Cuboid::new(1.0, 1.0, 1.0)));
-    commands.spawn((
-        // Визуал - красный куб
+    color: Color,
+) -> impl Bundle {
+    let mesh = meshes.add(raytraced(Cuboid::new(1.0, 1.0, 1.0)));
+    (
         Mesh3d(mesh.clone()),
         RaytracingMesh3d(mesh),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.8, 0.2, 0.2), // Красный цвет
+            base_color: color,
             ..default()
         })),
         Transform::from_translation(position),
@@ -157,33 +186,105 @@ pub fn spawn_enemy(
         Enemy {
             speed,
             attack_cooldown: 0.0,
+            stuck_timer: STUCK_CHECK_INTERVAL,
+            last_position: position,
+            sidestep_timer: 0.0,
+            sidestep_side: 1.0,
         },
         Health::new(50.0),
 
         Name::new("Enemy"),
-    ));
+    )
+}
+
+/// Двухэтажный враг: тело снизу и броня сверху. Броню достают только пули, выпущенные в прыжке.
+fn spawn_tall_enemy(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    position: Vec3,
+    speed: f32,
+) {
+    let plate_mesh = meshes.add(raytraced(Cuboid::new(1.0, 1.0, 1.0)));
+    let plate = commands.spawn((
+        Mesh3d(plate_mesh.clone()),
+        RaytracingMesh3d(plate_mesh),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.75, 0.75, 0.8), // Стальная броня
+            ..default()
+        })),
+        Transform::from_xyz(0.0, ENEMY_HALF_SIZE * 2.0, 0.0),
+    )).id();
+
+    let half = ENEMY_HALF_SIZE;
+    commands
+        .spawn(enemy_body(
+            meshes,
+            materials,
+            position,
+            speed * TALL_ENEMY_SPEED_FACTOR,
+            Color::srgb(0.45, 0.1, 0.1),
+        ))
+        .insert((
+            Collider::compound(vec![
+                (Vec3::ZERO, Quat::IDENTITY, Collider::cuboid(half, half, half)),
+                (Vec3::Y * half * 2.0, Quat::IDENTITY, Collider::cuboid(half, half, half)),
+            ]),
+            Armor {
+                current: ARMOR_HEALTH,
+                plate,
+            },
+        ))
+        .add_child(plate);
 }
 
 fn enemy_ai_system(
+    time: Res<Time>,
     player: Query<&Transform, With<Player>>,
-    mut enemies: Query<(&Transform, &Enemy, &mut Velocity), Without<Player>>,
+    mut enemies: Query<(&Transform, &mut Enemy, &mut Velocity), Without<Player>>,
 ) {
     let Ok(player) = player.single() else {
         return;
     };
+    let dt = time.delta_secs();
 
-    for (transform, enemy, mut velocity) in enemies.iter_mut() {
+    for (transform, mut enemy, mut velocity) in enemies.iter_mut() {
         let offset = player.translation - transform.translation;
-        let direction = Vec3::new(offset.x, 0.0, offset.z).normalize_or_zero();
-        velocity.linear = direction * enemy.speed;
+        let flat_offset = Vec3::new(offset.x, 0.0, offset.z);
+        let direction = flat_offset.normalize_or_zero();
+
+        enemy.stuck_timer -= dt;
+        if enemy.stuck_timer <= 0.0 {
+            let moved = transform.translation.distance(enemy.last_position);
+            let expected = enemy.speed * STUCK_CHECK_INTERVAL;
+            if moved < expected * STUCK_MOVED_FRACTION
+                && flat_offset.length() > NEAR_PLAYER_DISTANCE
+                && enemy.sidestep_timer <= 0.0
+            {
+                enemy.sidestep_timer = SIDESTEP_DURATION;
+                enemy.sidestep_side = -enemy.sidestep_side;
+            }
+            enemy.stuck_timer = STUCK_CHECK_INTERVAL;
+            enemy.last_position = transform.translation;
+        }
+
+        let heading = if enemy.sidestep_timer > 0.0 {
+            enemy.sidestep_timer -= dt;
+            Vec3::new(-direction.z, 0.0, direction.x) * enemy.sidestep_side
+        } else {
+            direction
+        };
+        velocity.linear = heading * enemy.speed;
     }
 }
 
-fn bullet_enemy_collision(
+/// Пуля исчезает при любом касании, кроме самого игрока. Урон получают только враги.
+fn bullet_collision(
     mut commands: Commands,
     mut collision_events: MessageReader<CollisionEvent>,
-    bullets: Query<&Bullet>,
-    mut enemies: Query<&mut Health, With<Enemy>>,
+    bullets: Query<(&Bullet, &Transform)>,
+    player: Query<(), With<Player>>,
+    mut enemies: Query<(&mut Health, Option<&mut Armor>), With<Enemy>>,
     mut spent_bullets: Local<Vec<Entity>>,
 ) {
     spent_bullets.clear();
@@ -191,7 +292,7 @@ fn bullet_enemy_collision(
         let CollisionEvent::Started(entity1, entity2, _) = collision_event else {
             continue;
         };
-        let (bullet_entity, enemy_entity) = if bullets.contains(*entity1) {
+        let (bullet_entity, other) = if bullets.contains(*entity1) {
             (*entity1, *entity2)
         } else if bullets.contains(*entity2) {
             (*entity2, *entity1)
@@ -199,18 +300,38 @@ fn bullet_enemy_collision(
             continue;
         };
 
-        // Одна пуля попадает только в одного врага, даже если задела двух за кадр
-        if spent_bullets.contains(&bullet_entity) {
+        // Одна пуля попадает только один раз, даже если задела двоих за кадр
+        if player.contains(other) || spent_bullets.contains(&bullet_entity) {
             continue;
         }
-        let (Ok(bullet), Ok(mut health)) =
-            (bullets.get(bullet_entity), enemies.get_mut(enemy_entity))
+        spent_bullets.push(bullet_entity);
+        commands.entity(bullet_entity).try_despawn();
+
+        let (Ok((bullet, bullet_transform)), Ok((mut health, armor))) =
+            (bullets.get(bullet_entity), enemies.get_mut(other))
         else {
             continue;
         };
-        health.take_damage(bullet.damage);
-        spent_bullets.push(bullet_entity);
-        commands.entity(bullet_entity).try_despawn();
+
+        match armor {
+            Some(mut armor) if armor.current > 0.0 => {
+                // Пуля с земли упирается в тело под защитой брони и не наносит урона
+                if bullet_transform.translation.y < LOWER_FLOOR_TOP_Y {
+                    continue;
+                }
+                armor.current -= bullet.damage;
+                if armor.current <= 0.0 {
+                    let half = ENEMY_HALF_SIZE;
+                    commands.entity(armor.plate).try_despawn();
+                    commands
+                        .entity(other)
+                        .remove::<Armor>()
+                        .insert(Collider::cuboid(half, half, half));
+                    info!("Броня сбита");
+                }
+            }
+            _ => health.take_damage(bullet.damage),
+        }
     }
 }
 
@@ -229,20 +350,21 @@ fn enemy_death_system(
 fn enemy_contact_damage(
     time: Res<Time>,
     mut player: Query<(&Transform, &mut Health), With<Player>>,
-    mut enemies: Query<(&Transform, &mut Enemy)>,
+    mut enemies: Query<(&Transform, &mut Enemy, Has<Armor>)>,
 ) {
     let Ok((player_transform, mut health)) = player.single_mut() else {
         return;
     };
 
-    for (transform, mut enemy) in enemies.iter_mut() {
+    for (transform, mut enemy, has_armor) in enemies.iter_mut() {
         enemy.attack_cooldown = (enemy.attack_cooldown - time.delta_secs()).max(0.0);
 
         let offset = player_transform.translation - transform.translation;
         let reach = ENEMY_HALF_SIZE + PLAYER_RADIUS;
         let touching = offset.x.abs() < reach
             && offset.z.abs() < reach
-            && offset.y.abs() < ENEMY_HALF_SIZE + PLAYER_HALF_HEIGHT;
+            && player_transform.translation.y - PLAYER_HALF_HEIGHT
+                < if has_armor { UPPER_FLOOR_TOP_Y } else { LOWER_FLOOR_TOP_Y };
 
         if touching && enemy.attack_cooldown <= 0.0 {
             enemy.attack_cooldown = CONTACT_COOLDOWN;
