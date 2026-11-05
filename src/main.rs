@@ -37,10 +37,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((
-            RapierDebugRenderPlugin::default(),
-            RapierPhysicsPlugin::<NoUserData>::default(),
-        ))
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         //.add_plugins(WorldInspectorPlugin::new())
         .add_plugins((
             LogDiagnosticsPlugin::default(),
