@@ -129,7 +129,7 @@ pub fn spawn_player(
             mesh: Mesh3d(meshes.add(Capsule3d::new(0.3, 1.0))), // немного меньше
             material: MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgb(0.1, 0.3, 1.0), // Яркий синий
-                emissive: LinearRgba::rgb(0.1, 0.1, 0.3), // Добавляем свечение
+                emissive: LinearRgba::rgb(0.01, 0.01, 0.03), // Едва заметный силуэт в темноте
                 metallic: 0.0,
                 perceptual_roughness: 0.5,
                 ..default()
