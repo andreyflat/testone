@@ -1,6 +1,7 @@
 // src/weapons.rs - Стрельба вперед по направлению игрока
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
+use crate::enemies::ENEMY_CENTER_Y;
 use crate::player::Player;
 
 pub struct WeaponsPlugin;
@@ -9,7 +10,6 @@ impl Plugin for WeaponsPlugin {
         app.add_systems(Update, (
                handle_shooting,
                update_bullets,
-               cleanup_bullets,
            ));
     }
 }
@@ -60,9 +60,11 @@ pub fn handle_shooting(
         // В Bevy forward направление это -Z (Vec3::NEG_Z)
         let forward_direction = player_transform.rotation * Vec3::NEG_Z;
         
-        // Позиция спавна пули - немного перед игроком
-        let spawn_position = player_transform.translation + forward_direction * 1.0 + Vec3::Y * 0.5;
-        
+        // Пуля появляется перед игроком на высоте врагов: стрельба в прыжке тоже попадает
+        let mut spawn_position = player_transform.translation + forward_direction * 1.0;
+        spawn_position.y = ENEMY_CENTER_Y;
+
+
         // Создаем пулю
         spawn_bullet(
             &mut commands,
@@ -101,8 +103,10 @@ fn spawn_bullet(
             lifetime: 2.0, // пуля живет 2 секунды
         },
         RigidBody::Dynamic,
+        GravityScale(0.0), // Пуля летит ровно по прицелу
         Collider::ball(0.15),
         Sensor, // пуля проходит сквозь объекты, но регистрирует столкновения
+        ActiveEvents::COLLISION_EVENTS,
         Velocity {
             linear: direction * bullet_speed,
             angular: Vec3::ZERO,
@@ -122,18 +126,7 @@ fn update_bullets(
         // Уменьшаем время жизни
         bullet.lifetime -= time.delta_secs();
         if bullet.lifetime <= 0.0 {
-            commands.entity(entity).despawn();
-        }
-    }
-}
-
-fn cleanup_bullets(
-    mut commands: Commands,
-    bullet_query: Query<(Entity, &Bullet)>,
-) {
-    for (entity, bullet) in bullet_query.iter() {
-        if bullet.lifetime <= 0.0 {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn(); // В этом же кадре пулю могло уже снять попадание
         }
     }
 }

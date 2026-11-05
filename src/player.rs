@@ -2,6 +2,7 @@
 use bevy::prelude::*;
 use bevy::input::keyboard::KeyCode;
 use bevy_rapier3d::prelude::*;
+use crate::enemies::{ENEMY_GROUP, Health, PLAYER_GROUP, PLAYER_MAX_HEALTH};
 
 #[derive(Resource)]
 pub struct GameSettings {
@@ -136,9 +137,12 @@ pub fn spawn_player(
         })
         .id();
 
+    let groups = CollisionGroups::new(PLAYER_GROUP, Group::ALL ^ ENEMY_GROUP);
     commands.entity(player)
-        .insert(ActiveEvents::COLLISION_EVENTS)
+        .insert(Health::new(PLAYER_MAX_HEALTH))
+        .insert(groups)
         .insert(KinematicCharacterController {
+            filter_groups: Some(groups), // Контроллер не упирается во врагов
             offset: CharacterLength::Absolute(0.02), // Увеличили offset
             up: Vec3::Y,
             max_slope_climb_angle: 0.785398, // 45 градусов

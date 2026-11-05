@@ -1,25 +1,60 @@
-// src/enemies.rs - Полная система врагов
+// src/enemies.rs - Враги, бесконечные волны, урон при касании и смерть игрока
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 use crate::player::Player;
 use crate::weapons::Bullet;
 
+pub const PLAYER_MAX_HEALTH: f32 = 100.0;
+// Игрок и враги не сталкиваются физически: враг наносит урон при касании, но не служит стеной
+pub const PLAYER_GROUP: Group = Group::GROUP_1;
+pub const ENEMY_GROUP: Group = Group::GROUP_2;
+
+/// Высота центра врага над началом координат. На ней же летят пули.
+pub const ENEMY_CENTER_Y: f32 = 0.6;
+const ENEMY_HALF_SIZE: f32 = 0.5;
+const PLAYER_RADIUS: f32 = 0.3;
+const PLAYER_HALF_HEIGHT: f32 = 0.8;
+const CONTACT_DAMAGE: f32 = 10.0;
+const CONTACT_COOLDOWN: f32 = 0.5;
+
+const ARENA_HALF_SIZE: f32 = 24.0;
+const WAVE_SPAWN_RADIUS: f32 = 15.0;
+const WAVE_DELAY: f32 = 2.0;
+
 pub struct EnemiesPlugin;
 impl Plugin for EnemiesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (
+        app.init_resource::<WaveState>()
+            .add_systems(Update, (
+                wave_system,
                 enemy_ai_system,
                 bullet_enemy_collision,
                 enemy_death_system,
-            ))
-           .add_systems(Startup, spawn_initial_enemies);
+                enemy_contact_damage,
+                player_death_system,
+            ).chain());
+    }
+}
+
+#[derive(Resource)]
+pub struct WaveState {
+    pub wave: u32,
+    pub delay: f32,
+}
+
+impl Default for WaveState {
+    fn default() -> Self {
+        Self {
+            wave: 0,
+            delay: WAVE_DELAY,
+        }
     }
 }
 
 #[derive(Component)]
 pub struct Enemy {
     pub speed: f32,
-    pub target: Option<Entity>,
+    pub attack_cooldown: f32,
 }
 
 #[derive(Component)]
@@ -33,30 +68,61 @@ impl Health {
             current: max_health,
         }
     }
-    
+
     pub fn take_damage(&mut self, damage: f32) {
         self.current = (self.current - damage).max(0.0);
     }
-    
+
     pub fn is_dead(&self) -> bool {
         self.current <= 0.0
     }
 }
 
-fn spawn_initial_enemies(
+/// Когда врагов не осталось, после паузы запускает следующую, более сложную волну.
+fn wave_system(
+    time: Res<Time>,
+    mut wave_state: ResMut<WaveState>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    enemies: Query<(), With<Enemy>>,
+    player: Query<&Transform, With<Player>>,
 ) {
-    // Спавним несколько врагов вокруг игрока
-    let spawn_positions = vec![
-        Vec3::new(5.0, 1.0, 5.0),
-        Vec3::new(-5.0, 1.0, 5.0),
-        Vec3::new(5.0, 1.0, -5.0),
-    ];
-    
-    for pos in spawn_positions {
-        spawn_enemy(&mut commands, &mut meshes, &mut materials, pos);
+    if !enemies.is_empty() {
+        return;
+    }
+    wave_state.delay -= time.delta_secs();
+    if wave_state.delay > 0.0 {
+        return;
+    }
+    let Ok(player) = player.single() else {
+        return;
+    };
+
+    wave_state.wave += 1;
+    wave_state.delay = WAVE_DELAY;
+    let wave = wave_state.wave;
+    let count = 1 + wave * 2;
+    let speed = (2.5 + wave as f32 * 0.25).min(7.0);
+    info!("Волна {wave}: врагов {count}, скорость {speed:.2}");
+
+    // Золотой угол равномерно раскладывает врагов по кольцу вокруг игрока
+    const GOLDEN_ANGLE: f32 = 2.399_963;
+    for i in 0..count {
+        let angle = (i + wave) as f32 * GOLDEN_ANGLE;
+        let x = player.translation.x + angle.cos() * WAVE_SPAWN_RADIUS;
+        let z = player.translation.z + angle.sin() * WAVE_SPAWN_RADIUS;
+        spawn_enemy(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            Vec3::new(
+                x.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
+                ENEMY_CENTER_Y,
+                z.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
+            ),
+            speed,
+        );
     }
 }
 
@@ -65,6 +131,7 @@ pub fn spawn_enemy(
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     position: Vec3,
+    speed: f32,
 ) {
     commands.spawn((
         // Визуал - красный куб
@@ -74,97 +141,134 @@ pub fn spawn_enemy(
             ..default()
         })),
         Transform::from_translation(position),
-        
+
         // Физика
         RigidBody::Dynamic,
         Velocity::default(),
-        Collider::cuboid(0.5, 0.5, 0.5),
+        GravityScale(0.0), // Враги движутся строго в плоскости арены
+        Collider::cuboid(ENEMY_HALF_SIZE, ENEMY_HALF_SIZE, ENEMY_HALF_SIZE),
+        CollisionGroups::new(ENEMY_GROUP, Group::ALL ^ PLAYER_GROUP),
         LockedAxes::ROTATION_LOCKED, // Не позволяем врагу вращаться
-        
+
         // Компоненты врага
         Enemy {
-            speed: 3.0,
-            target: None,
+            speed,
+            attack_cooldown: 0.0,
         },
         Health::new(50.0),
-        
+
         Name::new("Enemy"),
     ));
 }
 
 fn enemy_ai_system(
-    player_query: Query<Entity, With<Player>>,
-    player_transform_query: Query<&Transform, With<Player>>,
-    mut enemy_query: Query<(&Transform, &mut Enemy, &mut Velocity), (Without<Player>, With<Enemy>)>,
+    player: Query<&Transform, With<Player>>,
+    mut enemies: Query<(&Transform, &Enemy, &mut Velocity), Without<Player>>,
 ) {
-    let Ok(player_entity) = player_query.single() else {
+    let Ok(player) = player.single() else {
         return;
     };
 
-    let Ok(player_transform) = player_transform_query.single() else {
-        return;
-    };
-    
-    for (enemy_transform, mut enemy, mut velocity) in enemy_query.iter_mut() {
-        // Устанавливаем цель (игрока)
-        enemy.target = Some(player_entity);
-        
-        // Вычисляем направление к игроку
-        let direction = (player_transform.translation - enemy_transform.translation).normalize_or_zero();
-
-        velocity.linear = Vec3::new(
-            direction.x * enemy.speed,
-            0.0,
-            direction.z * enemy.speed,
-        );
-        // Двигаемся к игроку (только по X и Z, игнорируем Y)
-        //let movement = Vec3::new(
-        //    direction.x * enemy.speed * time.delta_secs(),
-        //    0.0,
-        //    direction.z * enemy.speed * time.delta_secs(),
-        //);
-                //enemy_transform.translation += movement;
+    for (transform, enemy, mut velocity) in enemies.iter_mut() {
+        let offset = player.translation - transform.translation;
+        let direction = Vec3::new(offset.x, 0.0, offset.z).normalize_or_zero();
+        velocity.linear = direction * enemy.speed;
     }
 }
 
 fn bullet_enemy_collision(
     mut commands: Commands,
     mut collision_events: MessageReader<CollisionEvent>,
-    bullet_query: Query<&Bullet>,
-    mut enemy_query: Query<&mut Health, With<Enemy>>,
+    bullets: Query<&Bullet>,
+    mut enemies: Query<&mut Health, With<Enemy>>,
+    mut spent_bullets: Local<Vec<Entity>>,
 ) {
+    spent_bullets.clear();
     for collision_event in collision_events.read() {
-        if let CollisionEvent::Started(entity1, entity2, _) = collision_event {
-            // Проверяем, столкнулись ли пуля и враг
-            let (bullet_entity, enemy_entity) = if bullet_query.contains(*entity1) {
-                (*entity1, *entity2)
-            } else if bullet_query.contains(*entity2) {
-                (*entity2, *entity1)
-            } else {
-                continue;
-            };
-            
-            // Получаем урон от пули
-            if let Ok(bullet) = bullet_query.get(bullet_entity) {
-                // Наносим урон врагу
-                if let Ok(mut enemy_health) = enemy_query.get_mut(enemy_entity) {
-                    enemy_health.take_damage(bullet.damage);
-                    
-                    // Удаляем пулю
-                    commands.entity(bullet_entity).despawn();
-                }
-            }
+        let CollisionEvent::Started(entity1, entity2, _) = collision_event else {
+            continue;
+        };
+        let (bullet_entity, enemy_entity) = if bullets.contains(*entity1) {
+            (*entity1, *entity2)
+        } else if bullets.contains(*entity2) {
+            (*entity2, *entity1)
+        } else {
+            continue;
+        };
+
+        // Одна пуля попадает только в одного врага, даже если задела двух за кадр
+        if spent_bullets.contains(&bullet_entity) {
+            continue;
         }
+        let (Ok(bullet), Ok(mut health)) =
+            (bullets.get(bullet_entity), enemies.get_mut(enemy_entity))
+        else {
+            continue;
+        };
+        health.take_damage(bullet.damage);
+        spent_bullets.push(bullet_entity);
+        commands.entity(bullet_entity).try_despawn();
     }
 }
 
 fn enemy_death_system(
     mut commands: Commands,
-    enemy_query: Query<(Entity, &Health), With<Enemy>>,
+    enemies: Query<(Entity, &Health), With<Enemy>>,
 ) {
-    for (enemy_entity, health) in enemy_query.iter() {
+    for (entity, health) in enemies.iter() {
         if health.is_dead() {
-            commands.entity(enemy_entity).despawn();
+            commands.entity(entity).despawn();
         }
     }
+}
+
+/// Урон считается по пересечению объёмов, а не по физике: над врагом можно перепрыгнуть.
+fn enemy_contact_damage(
+    time: Res<Time>,
+    mut player: Query<(&Transform, &mut Health), With<Player>>,
+    mut enemies: Query<(&Transform, &mut Enemy)>,
+) {
+    let Ok((player_transform, mut health)) = player.single_mut() else {
+        return;
+    };
+
+    for (transform, mut enemy) in enemies.iter_mut() {
+        enemy.attack_cooldown = (enemy.attack_cooldown - time.delta_secs()).max(0.0);
+
+        let offset = player_transform.translation - transform.translation;
+        let reach = ENEMY_HALF_SIZE + PLAYER_RADIUS;
+        let touching = offset.x.abs() < reach
+            && offset.z.abs() < reach
+            && offset.y.abs() < ENEMY_HALF_SIZE + PLAYER_HALF_HEIGHT;
+
+        if touching && enemy.attack_cooldown <= 0.0 {
+            enemy.attack_cooldown = CONTACT_COOLDOWN;
+            health.take_damage(CONTACT_DAMAGE);
+            info!("Игрок получил урон, здоровье: {}", health.current);
+        }
+    }
+}
+
+/// Смерть запускает забег заново с первой волны.
+fn player_death_system(
+    mut commands: Commands,
+    mut player: Query<(&mut Transform, &mut crate::player::Velocity, &mut Health), With<Player>>,
+    enemies: Query<Entity, With<Enemy>>,
+    mut wave_state: ResMut<WaveState>,
+) {
+    let Ok((mut transform, mut velocity, mut health)) = player.single_mut() else {
+        return;
+    };
+    if !health.is_dead() {
+        return;
+    }
+
+    info!("Игрок погиб на волне {}. Новый забег", wave_state.wave);
+    for entity in enemies.iter() {
+        commands.entity(entity).despawn();
+    }
+    transform.translation = Vec3::new(0.0, 3.0, 0.0);
+    velocity.0 = Vec3::ZERO;
+    health.current = PLAYER_MAX_HEALTH;
+    *wave_state = WaveState::default();
 }
