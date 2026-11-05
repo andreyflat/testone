@@ -10,6 +10,9 @@ pub struct GameSettings {
     pub sv_air_accelerate: f32,
     pub sv_gravity: f32,
     pub sv_jump_force: f32,
+    pub sv_friction: f32,
+    pub sv_stopspeed: f32,
+    pub sv_air_control: f32,
 }
 
 impl Default for GameSettings {
@@ -20,6 +23,9 @@ impl Default for GameSettings {
             sv_air_accelerate: 7.0,
             sv_gravity: -9.81,
             sv_jump_force: 5.0,
+            sv_friction: 6.0,
+            sv_stopspeed: 2.5, // 100 единиц Quake 3 при 320 ед/с = 8 м/с
+            sv_air_control: 120.0, // 32 * 150 из CPMA, переведено в м/с (40 единиц = 1 м)
         }
     }
 }
@@ -82,14 +88,14 @@ impl Plugin for PlayerPlugin {
         app.insert_resource(GameSettings::default())
             .add_systems(Startup, spawn_player)
             .add_systems(Update, (
-                handle_input,
-                debug_player_position,
-                emergency_respawn,
-            ))
-            .add_systems(FixedUpdate, (
+                (
+                    handle_input,
                     apply_acceleration_cpma,
                     move_kinematic_player_by_velocity,
-            ).chain());
+                ).chain(),
+                debug_player_position,
+                emergency_respawn,
+            ));
     }
 }
 
@@ -137,7 +143,7 @@ pub fn spawn_player(
             up: Vec3::Y,
             max_slope_climb_angle: 0.785398, // 45 градусов
             min_slope_slide_angle: 0.785398,
-            slide: false,
+            slide: true, // Без этого контроллер останавливается при первом касании пола
             apply_impulse_to_dynamic_bodies: true,
             autostep: Some(CharacterAutostep {
                 max_height: CharacterLength::Absolute(0.3),
@@ -187,6 +193,19 @@ pub fn apply_acceleration_cpma(
         let wish_dir = wish_dir.0.normalize_or_zero();
         let wish_speed = wish_speed.0;
 
+        // Трение как в Quake 3. При зажатом прыжке не применяется,
+        // иначе распрыжка теряла бы скорость в момент приземления.
+        if on_ground && !jump.is_jumping {
+            let speed = Vec3::new(vel.x, 0.0, vel.z).length();
+            if speed > 0.0 {
+                let control = speed.max(settings.sv_stopspeed);
+                let new_speed = (speed - control * settings.sv_friction * dt).max(0.0);
+                let scale = new_speed / speed;
+                vel.x *= scale;
+                vel.z *= scale;
+            }
+        }
+
         // Применяем ускорение только если есть желаемое направление
         if wish_dir != Vec3::ZERO {
             let accel = if on_ground {
@@ -203,21 +222,29 @@ pub fn apply_acceleration_cpma(
                 let accel_speed = max_accel.min(add_speed);
                 vel += accel_speed * wish_dir;
             }
-        }
 
-        // Ограничиваем горизонтальную скорость только на земле
-        if on_ground {
-            let horizontal_speed = Vec3::new(vel.x, 0.0, vel.z).length();
-            if horizontal_speed > settings.sv_maxspeed {
-                let scale = settings.sv_maxspeed / horizontal_speed;
-                vel.x *= scale;
-                vel.z *= scale;
+            // Air control как в CPMA: поворачивает скорость к нажатому направлению,
+            // не меняя её величину. Мышь при виде сверху не поворачивает движение,
+            // поэтому работает для любого направления, а не только для чистого W.
+            if !on_ground {
+                let horizontal = Vec3::new(vel.x, 0.0, vel.z);
+                let speed = horizontal.length();
+                let dot = horizontal.normalize_or_zero().dot(wish_dir);
+                if dot > 0.0 {
+                    let k = settings.sv_air_control * dot * dot * dt;
+                    let turned = (horizontal + wish_dir * k).normalize_or_zero() * speed;
+                    vel.x = turned.x;
+                    vel.z = turned.z;
+                }
             }
         }
 
         // Применяем собственную гравитацию
         if !on_ground {
             vel.y += settings.sv_gravity * dt;
+        } else if vel.y < 0.0 {
+            // Приземлились: скорость падения иначе вдавливает капсулу в пол
+            vel.y = 0.0;
         }
 
         // Обработка прыжка
@@ -249,11 +276,10 @@ pub fn move_kinematic_player_by_velocity(
     time: Res<Time>,
     mut query: Query<(
         &Velocity,
-        &mut Transform,
         &mut KinematicCharacterController,
     ), With<Player>>,
 ) {
-    for (velocity, mut transform, mut controller) in query.iter_mut() {
+    for (velocity, mut controller) in query.iter_mut() {
         let delta = velocity.0 * time.delta_secs();
         
         if delta.is_finite() && delta.length_squared() < 100.0 {
@@ -261,18 +287,12 @@ pub fn move_kinematic_player_by_velocity(
         } else {
             controller.translation = Some(Vec3::ZERO);
         }
-        
-        // Предотвращаем провал под мир
-        if transform.translation.y < 0.5 {
-            transform.translation.y = 1.0;
-            // Сбрасываем вертикальную скорость при "телепорте"
-            // velocity.0.y = 0.0; // Это нужно сделать через mut, но у нас нет доступа
-        }
     }
 }
 
 pub fn handle_input(
     keyboard: Res<ButtonInput<KeyCode>>,
+    settings: Res<GameSettings>,
     mut query: Query<(&mut WishDirection, &mut WishSpeed, &mut Jump), With<Player>>,
 ) {
     for (mut wish_dir, mut wish_speed, mut jump) in query.iter_mut() {
@@ -292,15 +312,11 @@ pub fn handle_input(
             direction.x += 1.0;
         }
 
-        // Прыжок
-        if keyboard.just_pressed(KeyCode::Space) {
-            jump.is_jumping = true;
-        } else {
-            jump.is_jumping = false;
-        }
+        // Прыжок: зажатый пробел отталкивает сразу после приземления
+        jump.is_jumping = keyboard.pressed(KeyCode::Space);
 
         wish_dir.0 = direction.normalize_or_zero();
-        wish_speed.0 = if direction.length_squared() > 0.0 { 8.0 } else { 0.0 };
+        wish_speed.0 = if direction.length_squared() > 0.0 { settings.sv_maxspeed } else { 0.0 };
     }
 }
 
