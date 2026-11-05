@@ -1,5 +1,6 @@
 // src/weapons.rs - Стрельба вперед по направлению игрока
 use bevy::prelude::*;
+use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
 use crate::enemies::ENEMY_CENTER_Y;
 use crate::player::Player;
@@ -45,6 +46,7 @@ pub fn handle_shooting(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut bullet_assets: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
 ) {
     let Ok((player_transform, mut weapon)) = player_query.single_mut() else {
         return;
@@ -65,11 +67,21 @@ pub fn handle_shooting(
         spawn_position.y = ENEMY_CENTER_Y;
 
 
+        // Один меш и материал на все пули: для трассировки это намного дешевле
+        let (mesh, material) = bullet_assets.get_or_insert_with(|| (
+            meshes.add(crate::lights::raytraced(Sphere::new(0.15).mesh().ico(0).unwrap())),
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 1.0, 0.0), // Желтые пули
+                emissive: LinearRgba::rgb(1.0, 0.8, 0.2) * 20_000.0, // Пуля сама светит и освещает арену
+                ..default()
+            }),
+        ));
+
         // Создаем пулю
         spawn_bullet(
             &mut commands,
-            &mut meshes,
-            &mut materials,
+            mesh.clone(),
+            material.clone(),
             spawn_position,
             forward_direction,
             weapon.damage,
@@ -81,8 +93,8 @@ pub fn handle_shooting(
 
 fn spawn_bullet(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
     position: Vec3,
     direction: Vec3,
     damage: f32,
@@ -90,12 +102,9 @@ fn spawn_bullet(
     let bullet_speed = 50.0;
     
     commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(0.15))), // Чуть больше пули
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 1.0, 0.0), // Желтые пули
-            emissive: LinearRgba::rgb(1.0, 1.0, 0.0),
-            ..default()
-        })),
+        Mesh3d(mesh.clone()),
+        RaytracingMesh3d(mesh),
+        MeshMaterial3d(material),
         Transform::from_translation(position),
         Bullet {
             //velocity: direction * bullet_speed,

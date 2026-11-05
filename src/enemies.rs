@@ -1,5 +1,6 @@
 // src/enemies.rs - Враги, бесконечные волны, урон при касании и смерть игрока
 use bevy::prelude::*;
+use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
 use crate::player::Player;
 use crate::weapons::Bullet;
@@ -133,9 +134,11 @@ pub fn spawn_enemy(
     position: Vec3,
     speed: f32,
 ) {
+    let mesh = meshes.add(crate::lights::raytraced(Cuboid::new(1.0, 1.0, 1.0)));
     commands.spawn((
         // Визуал - красный куб
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        Mesh3d(mesh.clone()),
+        RaytracingMesh3d(mesh),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.8, 0.2, 0.2), // Красный цвет
             ..default()

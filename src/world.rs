@@ -1,5 +1,6 @@
 // src/world.rs - Восстановленная версия с поворотом игрока к курсору
 use bevy::prelude::*;
+use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
 use crate::player::{Player, WishDirection, PlayerCamera};
 
@@ -19,8 +20,10 @@ fn spawn_floor(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let mesh = meshes.add(crate::lights::raytraced(Plane3d::default().mesh().size(50.0, 50.0)));
     let entity = commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))), // Увеличили арену
+        Mesh3d(mesh.clone()), // Увеличили арену
+        RaytracingMesh3d(mesh),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.5, 0.5, 0.5),
             perceptual_roughness: 0.9,
@@ -136,13 +139,16 @@ pub fn spawn_collision_cube(
         Vec3::new(0.0, 1.0, -10.0),
     ];
     
+    let mesh = meshes.add(crate::lights::raytraced(Cuboid::new(2.0, 2.0, 2.0)));
     for pos in obstacles {
         commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(2.0, 2.0, 2.0).mesh())),
+            Mesh3d(mesh.clone()),
+            RaytracingMesh3d(mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgb(0.2, 0.3, 0.8),
-                perceptual_roughness: 0.5,
-                metallic: 0.5,
+                // Матовый материал: блики от глянцевых кубов дают сильный шум в отражённом свете
+                perceptual_roughness: 0.9,
+                metallic: 0.0,
                 ..default()
             })),
             Transform::from_translation(pos),

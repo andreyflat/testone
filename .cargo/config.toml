@@ -1,0 +1,4 @@
+# Пути для сборки DLSS. SDK лежит вне проекта: по лицензии NVIDIA его нельзя выкладывать в репозиторий.
+[env]
+DLSS_SDK = "/home/flat/PRJ/DEV/DLSS"
+VULKAN_SDK = "/usr"

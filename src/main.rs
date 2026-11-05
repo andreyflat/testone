@@ -12,6 +12,9 @@ mod world;
 mod weapons;
 mod enemies;
 
+use bevy::anti_alias::dlss::DlssProjectId;
+use bevy::asset::uuid::uuid;
+use bevy::solari::prelude::SolariPlugins;
 use bevy_rapier3d::prelude::*;
 //use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use player::PlayerPlugin;
@@ -23,6 +26,8 @@ use enemies::EnemiesPlugin;
 
 fn main() {
     App::new()
+        // Должен быть добавлен до DefaultPlugins
+        .insert_resource(DlssProjectId(uuid!("0a071ebc-923e-41cd-b00c-1272045d8302")))
         .add_plugins(PlayerPlugin)
         .add_plugins(CameraPlugin)
         .add_plugins(WorldPlugin)
@@ -37,6 +42,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(SolariPlugins)
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         //.add_plugins(WorldInspectorPlugin::new())
         .add_plugins((

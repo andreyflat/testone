@@ -1,6 +1,10 @@
 // src/camera.rs - Восстановленная оригинальная камера
 use bevy::prelude::*;
-use bevy::camera::Hdr;
+use bevy::anti_alias::dlss::{Dlss, DlssRayReconstructionFeature, DlssRayReconstructionSupported};
+use bevy::camera::{CameraMainTextureUsages, Hdr};
+use bevy::post_process::bloom::Bloom;
+use bevy::render::render_resource::TextureUsages;
+use bevy::solari::prelude::SolariLighting;
 use crate::player::{Player, PlayerCamera};
 
 pub struct CameraPlugin;
@@ -11,14 +15,22 @@ impl Plugin for CameraPlugin {
     }
 }
 
-fn spawn_camera(mut commands: Commands) {
-    commands.spawn((
+fn spawn_camera(
+    mut commands: Commands,
+    dlss_ray_reconstruction: Option<Res<DlssRayReconstructionSupported>>,
+) {
+    let mut camera = commands.spawn((
         Camera3d::default(),
         Camera {
             order: 0,
             ..default()
         },
         Hdr,
+        // Обязательные настройки камеры для Solari
+        CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
+        Msaa::Off,
+        SolariLighting::default(),
+        Bloom::NATURAL, // Мягкое свечение вокруг ярких пуль и пятна фонаря
         Transform::from_xyz(0.0, 5.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         FollowCamera {
             distance: 10.0,
@@ -27,6 +39,14 @@ fn spawn_camera(mut commands: Commands) {
         },
         PlayerCamera,
     ));
+
+    // Шумоподавитель для Solari. Работает только на RTX, без него просто больше зерна
+    if dlss_ray_reconstruction.is_some() {
+        camera.insert(Dlss::<DlssRayReconstructionFeature>::default());
+        info!("DLSS Ray Reconstruction включён");
+    } else {
+        warn!("DLSS Ray Reconstruction недоступен на этой системе");
+    }
 }
 
 #[derive(Component)]
