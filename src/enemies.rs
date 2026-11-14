@@ -14,10 +14,17 @@ pub const ENEMY_GROUP: Group = Group::GROUP_2;
 
 /// Высота центра врага над началом координат. На ней же летят пули.
 pub const ENEMY_CENTER_Y: f32 = 0.6;
-const ENEMY_HALF_SIZE: f32 = 0.5;
+/// Тело врага - вертикальная капсула высотой 1 м.
+const ENEMY_RADIUS: f32 = 0.4;
+const ENEMY_HALF_HEIGHT: f32 = 0.5;
+/// Половина длины цилиндрической части капсулы между полусферами.
+const ENEMY_SEGMENT_HALF: f32 = ENEMY_HALF_HEIGHT - ENEMY_RADIUS;
+/// Броня большого врага - шар, лежащий на верхушке капсулы.
+const ARMOR_RADIUS: f32 = 0.5;
+const ARMOR_OFFSET_Y: f32 = ENEMY_HALF_HEIGHT + ARMOR_RADIUS;
 /// Верх низкого врага и граница между этажами двухэтажного.
-const LOWER_FLOOR_TOP_Y: f32 = ENEMY_CENTER_Y + ENEMY_HALF_SIZE;
-const UPPER_FLOOR_TOP_Y: f32 = LOWER_FLOOR_TOP_Y + ENEMY_HALF_SIZE * 2.0;
+const LOWER_FLOOR_TOP_Y: f32 = ENEMY_CENTER_Y + ENEMY_HALF_HEIGHT;
+const UPPER_FLOOR_TOP_Y: f32 = LOWER_FLOOR_TOP_Y + ARMOR_RADIUS * 2.0;
 const ARMOR_HEALTH: f32 = 75.0;
 const TALL_ENEMY_SPEED_FACTOR: f32 = 0.7;
 
@@ -152,8 +159,8 @@ fn wave_system(
 /// Точка на кольце вокруг игрока, не занятая стенами и платформами.
 /// Если угол упирается в геометрию, поворачивает дальше и сужает кольцо.
 fn spawn_point(player: Vec3, angle: f32) -> Vec3 {
-    // Отступ с запасом на диагональ куба двухэтажного врага
-    const MARGIN: f32 = ENEMY_HALF_SIZE * 1.5;
+    // Отступ с запасом на самую широкую часть врага - шар брони
+    const MARGIN: f32 = ARMOR_RADIUS * 1.5;
     let limit = ARENA_HALF_SIZE - MARGIN;
     let candidate = |angle: f32, radius: f32| Vec3::new(
         (player.x + angle.cos() * radius).clamp(-limit, limit),
@@ -171,6 +178,10 @@ fn spawn_point(player: Vec3, angle: f32) -> Vec3 {
     candidate(angle, WAVE_SPAWN_RADIUS)
 }
 
+fn body_collider() -> Collider {
+    Collider::capsule_y(ENEMY_SEGMENT_HALF, ENEMY_RADIUS)
+}
+
 /// Низкий враг и нижний этаж двухэтажного.
 fn enemy_body(
     meshes: &mut Assets<Mesh>,
@@ -179,7 +190,7 @@ fn enemy_body(
     speed: f32,
     color: Color,
 ) -> impl Bundle {
-    let mesh = meshes.add(raytraced(Cuboid::new(1.0, 1.0, 1.0)));
+    let mesh = meshes.add(raytraced(Capsule3d::new(ENEMY_RADIUS, ENEMY_SEGMENT_HALF * 2.0)));
     (
         Mesh3d(mesh.clone()),
         RaytracingMesh3d(mesh),
@@ -193,7 +204,7 @@ fn enemy_body(
         RigidBody::Dynamic,
         Velocity::default(),
         GravityScale(0.0), // Враги движутся строго в плоскости арены
-        Collider::cuboid(ENEMY_HALF_SIZE, ENEMY_HALF_SIZE, ENEMY_HALF_SIZE),
+        body_collider(),
         CollisionGroups::new(ENEMY_GROUP, Group::ALL ^ PLAYER_GROUP),
         LockedAxes::ROTATION_LOCKED, // Не позволяем врагу вращаться
 
@@ -220,7 +231,7 @@ fn spawn_tall_enemy(
     position: Vec3,
     speed: f32,
 ) {
-    let plate_mesh = meshes.add(raytraced(Cuboid::new(1.0, 1.0, 1.0)));
+    let plate_mesh = meshes.add(raytraced(Sphere::new(ARMOR_RADIUS).mesh().uv(32, 18)));
     let plate = commands.spawn((
         Mesh3d(plate_mesh.clone()),
         RaytracingMesh3d(plate_mesh),
@@ -228,10 +239,9 @@ fn spawn_tall_enemy(
             base_color: Color::srgb(0.75, 0.75, 0.8), // Стальная броня
             ..default()
         })),
-        Transform::from_xyz(0.0, ENEMY_HALF_SIZE * 2.0, 0.0),
+        Transform::from_xyz(0.0, ARMOR_OFFSET_Y, 0.0),
     )).id();
 
-    let half = ENEMY_HALF_SIZE;
     commands
         .spawn(enemy_body(
             meshes,
@@ -242,8 +252,8 @@ fn spawn_tall_enemy(
         ))
         .insert((
             Collider::compound(vec![
-                (Vec3::ZERO, Quat::IDENTITY, Collider::cuboid(half, half, half)),
-                (Vec3::Y * half * 2.0, Quat::IDENTITY, Collider::cuboid(half, half, half)),
+                (Vec3::ZERO, Quat::IDENTITY, body_collider()),
+                (Vec3::Y * ARMOR_OFFSET_Y, Quat::IDENTITY, Collider::ball(ARMOR_RADIUS)),
             ]),
             Armor {
                 current: ARMOR_HEALTH,
@@ -336,12 +346,11 @@ fn bullet_collision(
                 }
                 armor.current -= bullet.damage;
                 if armor.current <= 0.0 {
-                    let half = ENEMY_HALF_SIZE;
                     commands.entity(armor.plate).try_despawn();
                     commands
                         .entity(other)
                         .remove::<Armor>()
-                        .insert(Collider::cuboid(half, half, half));
+                        .insert(body_collider());
                     info!("Броня сбита");
                 }
             }
@@ -375,9 +384,9 @@ fn enemy_contact_damage(
         enemy.attack_cooldown = (enemy.attack_cooldown - time.delta_secs()).max(0.0);
 
         let offset = player_transform.translation - transform.translation;
-        let reach = ENEMY_HALF_SIZE + PLAYER_RADIUS;
-        let touching = offset.x.abs() < reach
-            && offset.z.abs() < reach
+        // Шар брони шире капсулы, поэтому большой враг достаёт игрока дальше
+        let reach = if has_armor { ARMOR_RADIUS } else { ENEMY_RADIUS } + PLAYER_RADIUS;
+        let touching = Vec2::new(offset.x, offset.z).length() < reach
             && player_transform.translation.y - PLAYER_HALF_HEIGHT
                 < if has_armor { UPPER_FLOOR_TOP_Y } else { LOWER_FLOOR_TOP_Y };
 

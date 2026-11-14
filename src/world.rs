@@ -156,7 +156,7 @@ const BOUNDARY_HEIGHT: f32 = 8.0;
 const BOUNDARY_VISIBLE_HEIGHT: f32 = 3.0;
 const NEAR_BOUNDARY_VISIBLE_HEIGHT: f32 = 0.4;
 
-const BOX: f32 = 0.9; // Обычный прыжок с запасом (потолок около 1.25 м)
+const BOX: f32 = 0.9; // Обычный прыжок с запасом (потолок около 1.14 м)
 const LEDGE: f32 = 1.8; // Обычным прыжком только с ящика рядом
 const WALL: f32 = 2.0; // Перегородка: нужен прыжок от стены
 const TOWER: f32 = 3.0; // Нужна цепочка прыжков от стен

@@ -26,12 +26,12 @@ impl Default for GameSettings {
             sv_maxspeed: 8.0,
             sv_accelerate: 10.0,
             sv_air_accelerate: 7.0,
-            sv_gravity: -9.81,
-            sv_jump_force: 5.0,
+            sv_gravity: -20.0, // 800 ед/с² из Quake 3 (40 единиц = 1 м)
+            sv_jump_force: 6.75, // 270 ед/с: высота ~1.14 м, ~0.68 с в воздухе
             sv_friction: 6.0,
             sv_stopspeed: 2.5, // 100 единиц Quake 3 при 320 ед/с = 8 м/с
             sv_air_control: 120.0, // 32 * 150 из CPMA, переведено в м/с (40 единиц = 1 м)
-            sv_wall_jump_force: 6.5,
+            sv_wall_jump_force: 9.0, // Подъём ~2 м: хватает, чтобы забраться на перегородку
             sv_wall_jump_push: 4.5,
         }
     }
