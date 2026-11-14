@@ -1,14 +1,12 @@
-// src/world.rs - Восстановленная версия с поворотом игрока к курсору
+// src/world.rs - Пол и геометрия уровня
 use bevy::prelude::*;
 use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
-use crate::player::{Player, WishDirection, PlayerCamera};
 
 pub struct WorldPlugin;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_floor, spawn_level))
-           .add_systems(Update, draw_cursor);
+        app.add_systems(Startup, (spawn_floor, spawn_level));
     }
 }
 
@@ -50,80 +48,6 @@ fn spawn_floor(
     ));
 }
 
-pub fn draw_cursor(
-    camera_query: Query<(&Camera, &GlobalTransform), With<PlayerCamera>>,
-    ground: Query<&GlobalTransform, With<Ground>>,
-    windows: Query<&Window>,
-    mut gizmos: Gizmos,
-    mut player_query: Query<(&mut Transform, &WishDirection), With<Player>>,
-) {
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        return;
-    };
-    let ground_transform = if let Some(transform) = ground.iter().next() {
-        transform
-    } else {
-        return;
-    };
-
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(cursor_position) = window.cursor_position() else {
-        return;
-    };
-
-    // Вычисляем луч из камеры в мир на основе позиции курсора
-    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_position) else {
-        return;
-    };
-
-    // Вычисляем точку пересечения луча с плоскостью земли
-    let Some(distance) = ray.intersect_plane(
-        ground_transform.translation(),
-        InfinitePlane3d::new(ground_transform.up())
-    ) else {
-        return;
-    };
-    let point = ray.get_point(distance);
-
-    // Рисуем круг чуть выше плоскости земли в этой позиции
-    gizmos.circle(
-        Isometry3d::new(
-            point + ground_transform.up() * 0.01,
-            Quat::from_rotation_arc(Vec3::Z, ground_transform.up().as_vec3()),
-        ),
-        0.2,
-        Color::WHITE,
-    );
-
-    // Поворачиваем игрока в направлении точки пересечения
-    if let Ok((mut player_transform, wish_dir)) = player_query.single_mut() {
-        let target_point = point;
-        let current_pos = player_transform.translation;
-        
-        // Получаем направление только в горизонтальной плоскости
-        let direction = Vec3::new(
-            target_point.x - current_pos.x,
-            0.0, // Игнорируем вертикальную составляющую
-            target_point.z - current_pos.z,
-        ).normalize();
-
-        // Стандартное направление "вперед" в Bevy
-        let forward = Vec3::NEG_Z;
-
-        if direction != Vec3::ZERO {
-            // Создаем поворот от вектора вперед к направлению цели
-            let rotation = Quat::from_rotation_arc(forward, direction);
-            player_transform.rotation = rotation;
-        } else if wish_dir.0 != Vec3::ZERO {
-            // Если нет направления к курсору, но игрок движется, поворачиваем его в направлении движения
-            let rotation = Quat::from_rotation_arc(forward, wish_dir.0);
-            player_transform.rotation = rotation;
-        }
-    }
-}
-
 /// Назначение блока определяет его цвет.
 #[derive(Clone, Copy)]
 enum BlockKind {
@@ -150,11 +74,11 @@ const fn block(x: f32, z: f32, half_x: f32, height: f32, half_z: f32, kind: Bloc
 /// Внутренний край стен совпадает с краем пола.
 pub const ARENA_HALF_SIZE: f32 = 25.0;
 const BOUNDARY_THICKNESS: f32 = 0.5;
-/// Стены периметра выше любого прыжка, чтобы с арены нельзя было выпрыгнуть.
-const BOUNDARY_HEIGHT: f32 = 8.0;
-/// Видимая высота стен. Ближняя к камере стена низкая, иначе она закрывала бы игрока у края.
-const BOUNDARY_VISIBLE_HEIGHT: f32 = 3.0;
-const NEAR_BOUNDARY_VISIBLE_HEIGHT: f32 = 0.4;
+/// Высота стен периметра. Невидимых продолжений у них нет: в них упирались бы прицел и снаряды.
+/// Выпрыгнуть с арены не даёт ограничение в движении игрока.
+const BOUNDARY_HEIGHT: f32 = 3.0;
+/// Ближняя к камере стена низкая, иначе она закрывала бы игрока у края.
+const NEAR_BOUNDARY_HEIGHT: f32 = 0.4;
 
 const BOX: f32 = 0.9; // Обычный прыжок с запасом (потолок около 1.14 м)
 const LEDGE: f32 = 1.8; // Обычным прыжком только с ящика рядом
@@ -231,49 +155,40 @@ fn spawn_level(
             BlockKind::Partition => partition.clone(),
             BlockKind::Platform => platform.clone(),
         };
-        spawn_block(&mut commands, &mut meshes, material, b.center, b.half, b.half);
+        spawn_block(&mut commands, &mut meshes, material, b.center, b.half);
     }
 
-    // Периметр: коллайдер во всю высоту, меш может быть ниже
+    // Периметр
     let edge = ARENA_HALF_SIZE + BOUNDARY_THICKNESS * 0.5;
     let half_t = BOUNDARY_THICKNESS * 0.5;
     let long = ARENA_HALF_SIZE + BOUNDARY_THICKNESS;
     let walls = [
-        (Vec3::new(0.0, 0.0, -edge), Vec3::new(long, 0.0, half_t), BOUNDARY_VISIBLE_HEIGHT),
-        (Vec3::new(0.0, 0.0, edge), Vec3::new(long, 0.0, half_t), NEAR_BOUNDARY_VISIBLE_HEIGHT),
-        (Vec3::new(-edge, 0.0, 0.0), Vec3::new(half_t, 0.0, ARENA_HALF_SIZE), BOUNDARY_VISIBLE_HEIGHT),
-        (Vec3::new(edge, 0.0, 0.0), Vec3::new(half_t, 0.0, ARENA_HALF_SIZE), BOUNDARY_VISIBLE_HEIGHT),
+        (Vec3::new(0.0, 0.0, -edge), Vec3::new(long, 0.0, half_t), BOUNDARY_HEIGHT),
+        (Vec3::new(0.0, 0.0, edge), Vec3::new(long, 0.0, half_t), NEAR_BOUNDARY_HEIGHT),
+        (Vec3::new(-edge, 0.0, 0.0), Vec3::new(half_t, 0.0, ARENA_HALF_SIZE), BOUNDARY_HEIGHT),
+        (Vec3::new(edge, 0.0, 0.0), Vec3::new(half_t, 0.0, ARENA_HALF_SIZE), BOUNDARY_HEIGHT),
     ];
-    for (base, half, visible_height) in walls {
-        let collider_half = half.with_y(BOUNDARY_HEIGHT * 0.5);
-        let mesh_half = half.with_y(visible_height * 0.5);
-        let center = base.with_y(collider_half.y);
-        spawn_block(&mut commands, &mut meshes, boundary.clone(), center, collider_half, mesh_half);
+    for (base, half, height) in walls {
+        let half = half.with_y(height * 0.5);
+        spawn_block(&mut commands, &mut meshes, boundary.clone(), base.with_y(half.y), half);
     }
 }
 
-/// Неподвижный блок. Меш стоит на том же полу, что и коллайдер, но может быть ниже него.
+/// Неподвижный блок: меш и коллайдер одного размера.
 fn spawn_block(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     material: Handle<StandardMaterial>,
     center: Vec3,
-    collider_half: Vec3,
-    mesh_half: Vec3,
+    half: Vec3,
 ) {
-    let mesh = meshes.add(crate::lights::raytraced(Cuboid::from_size(mesh_half * 2.0)));
-    let floor = center.y - collider_half.y;
-    commands
-        .spawn((
-            Transform::from_translation(center),
-            Visibility::default(),
-            RigidBody::Fixed,
-            Collider::cuboid(collider_half.x, collider_half.y, collider_half.z),
-        ))
-        .with_child((
-            Mesh3d(mesh.clone()),
-            RaytracingMesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::from_xyz(0.0, floor + mesh_half.y - center.y, 0.0),
-        ));
+    let mesh = meshes.add(crate::lights::raytraced(Cuboid::from_size(half * 2.0)));
+    commands.spawn((
+        Mesh3d(mesh.clone()),
+        RaytracingMesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(center),
+        RigidBody::Fixed,
+        Collider::cuboid(half.x, half.y, half.z),
+    ));
 }

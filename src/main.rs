@@ -11,6 +11,7 @@ mod camera;
 mod world;
 mod weapons;
 mod enemies;
+mod crosshair;
 
 use bevy::anti_alias::dlss::DlssProjectId;
 use bevy::asset::uuid::uuid;
@@ -23,6 +24,7 @@ use world::WorldPlugin;
 use lights::LightsPlugin;
 use weapons::{WeaponsPlugin, equip_player_weapon};
 use enemies::EnemiesPlugin;
+use crosshair::CrosshairPlugin;
 
 fn main() {
     App::new()
@@ -34,6 +36,7 @@ fn main() {
         .add_plugins(LightsPlugin)
         .add_plugins(WeaponsPlugin)
         .add_plugins(EnemiesPlugin)
+        .add_plugins(CrosshairPlugin)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 mode: WindowMode::Windowed,

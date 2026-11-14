@@ -4,7 +4,7 @@ use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
 use crate::lights::raytraced;
 use crate::player::Player;
-use crate::weapons::Bullet;
+use crate::weapons::{Bullet, Flash, WeaponAssets, spawn_flash};
 use crate::world::{ARENA_HALF_SIZE, is_blocked};
 
 pub const PLAYER_MAX_HEALTH: f32 = 100.0;
@@ -15,7 +15,7 @@ pub const ENEMY_GROUP: Group = Group::GROUP_2;
 /// Высота центра врага над началом координат. На ней же летят пули.
 pub const ENEMY_CENTER_Y: f32 = 0.6;
 /// Тело врага - вертикальная капсула высотой 1 м.
-const ENEMY_RADIUS: f32 = 0.4;
+pub const ENEMY_RADIUS: f32 = 0.4;
 const ENEMY_HALF_HEIGHT: f32 = 0.5;
 /// Половина длины цилиндрической части капсулы между полусферами.
 const ENEMY_SEGMENT_HALF: f32 = ENEMY_HALF_HEIGHT - ENEMY_RADIUS;
@@ -25,7 +25,8 @@ const ARMOR_OFFSET_Y: f32 = ENEMY_HALF_HEIGHT + ARMOR_RADIUS;
 /// Верх низкого врага и граница между этажами двухэтажного.
 const LOWER_FLOOR_TOP_Y: f32 = ENEMY_CENTER_Y + ENEMY_HALF_HEIGHT;
 const UPPER_FLOOR_TOP_Y: f32 = LOWER_FLOOR_TOP_Y + ARMOR_RADIUS * 2.0;
-const ARMOR_HEALTH: f32 = 75.0;
+const ARMOR_HEALTH: f32 = 100.0;
+const BODY_HEALTH: f32 = 100.0;
 const TALL_ENEMY_SPEED_FACTOR: f32 = 0.7;
 
 // Обход препятствий: враг, который почти не сдвинулся за время проверки, шагает вбок
@@ -217,7 +218,7 @@ fn enemy_body(
             sidestep_timer: 0.0,
             sidestep_side: 1.0,
         },
-        Health::new(50.0),
+        Health::new(BODY_HEALTH),
 
         Name::new("Enemy"),
     )
@@ -309,7 +310,9 @@ fn bullet_collision(
     mut collision_events: MessageReader<CollisionEvent>,
     bullets: Query<(&Bullet, &Transform)>,
     player: Query<(), With<Player>>,
-    mut enemies: Query<(&mut Health, Option<&mut Armor>), With<Enemy>>,
+    mut enemies: Query<(Entity, &Transform, &mut Health, Option<&mut Armor>), With<Enemy>>,
+    weapon_assets: Res<WeaponAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut spent_bullets: Local<Vec<Entity>>,
 ) {
     spent_bullets.clear();
@@ -332,30 +335,60 @@ fn bullet_collision(
         spent_bullets.push(bullet_entity);
         commands.entity(bullet_entity).try_despawn();
 
-        let (Ok((bullet, bullet_transform)), Ok((mut health, armor))) =
-            (bullets.get(bullet_entity), enemies.get_mut(other))
-        else {
+        let Ok((bullet, bullet_transform)) = bullets.get(bullet_entity) else {
             continue;
         };
+        let position = bullet_transform.translation;
 
-        match armor {
-            Some(mut armor) if armor.current > 0.0 => {
-                // Пуля с земли упирается в тело под защитой брони и не наносит урона
-                if bullet_transform.translation.y < LOWER_FLOOR_TOP_Y {
-                    continue;
-                }
-                armor.current -= bullet.damage;
-                if armor.current <= 0.0 {
-                    commands.entity(armor.plate).try_despawn();
-                    commands
-                        .entity(other)
-                        .remove::<Armor>()
-                        .insert(body_collider());
-                    info!("Броня сбита");
+        if let Some(radius) = bullet.splash_radius {
+            // Ракета взрывается о любую поверхность и задевает всех врагов в радиусе
+            spawn_flash(&mut commands, &weapon_assets, &mut materials, Flash::explosion(position, radius));
+            for (enemy, transform, mut health, armor) in enemies.iter_mut() {
+                let center = transform.translation;
+                let top = enemy_top_y(armor.is_some());
+                let nearest = center.with_y(position.y.clamp(center.y - ENEMY_HALF_HEIGHT, top));
+                if nearest.distance(position) - ENEMY_RADIUS < radius {
+                    damage_enemy(&mut commands, enemy, &mut health, armor, None, bullet.damage);
                 }
             }
-            _ => health.take_damage(bullet.damage),
+            continue;
         }
+
+        if let Ok((enemy, _, mut health, armor)) = enemies.get_mut(other) {
+            damage_enemy(&mut commands, enemy, &mut health, armor, Some(position.y), bullet.damage);
+        }
+    }
+}
+
+/// Верх врага над полом: у бронированного это верх шара брони.
+pub fn enemy_top_y(armored: bool) -> f32 {
+    if armored { UPPER_FLOOR_TOP_Y } else { LOWER_FLOOR_TOP_Y }
+}
+
+/// Наносит урон врагу. Пока броня цела, урон принимает она, а попадание ниже брони
+/// (`hit_y` под границей этажей) не проходит вовсе. `hit_y = None` - взрыв: он достаёт броню.
+pub fn damage_enemy(
+    commands: &mut Commands,
+    enemy: Entity,
+    health: &mut Health,
+    armor: Option<Mut<Armor>>,
+    hit_y: Option<f32>,
+    damage: f32,
+) {
+    match armor {
+        Some(mut armor) if armor.current > 0.0 => {
+            // Выстрел с земли упирается в тело под защитой брони
+            if hit_y.is_some_and(|y| y < LOWER_FLOOR_TOP_Y) {
+                return;
+            }
+            armor.current -= damage;
+            if armor.current <= 0.0 {
+                commands.entity(armor.plate).try_despawn();
+                commands.entity(enemy).remove::<Armor>().insert(body_collider());
+                info!("Броня сбита");
+            }
+        }
+        _ => health.take_damage(damage),
     }
 }
 

@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use bevy::input::keyboard::KeyCode;
 use bevy_rapier3d::prelude::*;
 use crate::enemies::{ENEMY_GROUP, Health, PLAYER_GROUP, PLAYER_MAX_HEALTH};
+use crate::world::ARENA_HALF_SIZE;
 
 #[derive(Resource)]
 pub struct GameSettings {
@@ -353,13 +354,27 @@ pub fn apply_acceleration_cpma(
 pub fn move_kinematic_player_by_velocity(
     time: Res<Time>,
     mut query: Query<(
-        &Velocity,
+        &Transform,
+        &mut Velocity,
         &mut KinematicCharacterController,
     ), With<Player>>,
 ) {
-    for (velocity, mut controller) in query.iter_mut() {
-        let delta = velocity.0 * time.delta_secs();
-        
+    // Стены периметра невысокие, поэтому за край арены не пускает это ограничение
+    let limit = ARENA_HALF_SIZE - PLAYER_RADIUS;
+    for (transform, mut velocity, mut controller) in query.iter_mut() {
+        let mut delta = velocity.0 * time.delta_secs();
+        let position = transform.translation;
+        for axis in [0, 2] {
+            let next = position[axis] + delta[axis];
+            if next.abs() > limit {
+                delta[axis] = next.clamp(-limit, limit) - position[axis];
+                // Скорость в сторону края гасится, как при ударе о стену
+                if velocity.0[axis] * next > 0.0 {
+                    velocity.0[axis] = 0.0;
+                }
+            }
+        }
+
         if delta.is_finite() && delta.length_squared() < 100.0 {
             controller.translation = Some(delta);
         } else {
