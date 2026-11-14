@@ -5,6 +5,7 @@ use bevy_rapier3d::prelude::*;
 use crate::lights::raytraced;
 use crate::player::Player;
 use crate::weapons::Bullet;
+use crate::world::{ARENA_HALF_SIZE, is_blocked};
 
 pub const PLAYER_MAX_HEALTH: f32 = 100.0;
 // Игрок и враги не сталкиваются физически: враг наносит урон при касании, но не служит стеной
@@ -30,7 +31,6 @@ const PLAYER_HALF_HEIGHT: f32 = 0.8;
 const CONTACT_DAMAGE: f32 = 10.0;
 const CONTACT_COOLDOWN: f32 = 0.5;
 
-const ARENA_HALF_SIZE: f32 = 24.0;
 const WAVE_SPAWN_RADIUS: f32 = 15.0;
 const WAVE_DELAY: f32 = 2.0;
 
@@ -134,14 +134,7 @@ fn wave_system(
     // Золотой угол равномерно раскладывает врагов по кольцу вокруг игрока
     const GOLDEN_ANGLE: f32 = 2.399_963;
     for i in 0..count + tall_count {
-        let angle = (i + wave) as f32 * GOLDEN_ANGLE;
-        let x = player.translation.x + angle.cos() * WAVE_SPAWN_RADIUS;
-        let z = player.translation.z + angle.sin() * WAVE_SPAWN_RADIUS;
-        let position = Vec3::new(
-            x.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
-            ENEMY_CENTER_Y,
-            z.clamp(-ARENA_HALF_SIZE, ARENA_HALF_SIZE),
-        );
+        let position = spawn_point(player.translation, (i + wave) as f32 * GOLDEN_ANGLE);
         if i < count {
             commands.spawn(enemy_body(
                 &mut meshes,
@@ -154,6 +147,28 @@ fn wave_system(
             spawn_tall_enemy(&mut commands, &mut meshes, &mut materials, position, speed);
         }
     }
+}
+
+/// Точка на кольце вокруг игрока, не занятая стенами и платформами.
+/// Если угол упирается в геометрию, поворачивает дальше и сужает кольцо.
+fn spawn_point(player: Vec3, angle: f32) -> Vec3 {
+    // Отступ с запасом на диагональ куба двухэтажного врага
+    const MARGIN: f32 = ENEMY_HALF_SIZE * 1.5;
+    let limit = ARENA_HALF_SIZE - MARGIN;
+    let candidate = |angle: f32, radius: f32| Vec3::new(
+        (player.x + angle.cos() * radius).clamp(-limit, limit),
+        ENEMY_CENTER_Y,
+        (player.z + angle.sin() * radius).clamp(-limit, limit),
+    );
+    for radius in [WAVE_SPAWN_RADIUS, WAVE_SPAWN_RADIUS * 0.75, WAVE_SPAWN_RADIUS * 0.5] {
+        for step in 0..12 {
+            let position = candidate(angle + step as f32 * 0.3, radius);
+            if !is_blocked(position, MARGIN) {
+                return position;
+            }
+        }
+    }
+    candidate(angle, WAVE_SPAWN_RADIUS)
 }
 
 /// Низкий враг и нижний этаж двухэтажного.

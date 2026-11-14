@@ -14,6 +14,10 @@ pub struct GameSettings {
     pub sv_friction: f32,
     pub sv_stopspeed: f32,
     pub sv_air_control: f32,
+    /// Вертикальная скорость прыжка от стены. Больше обычного прыжка, чтобы подниматься выше.
+    pub sv_wall_jump_force: f32,
+    /// Скорость, с которой прыжок отталкивает от стены.
+    pub sv_wall_jump_push: f32,
 }
 
 impl Default for GameSettings {
@@ -27,6 +31,8 @@ impl Default for GameSettings {
             sv_friction: 6.0,
             sv_stopspeed: 2.5, // 100 единиц Quake 3 при 320 ед/с = 8 м/с
             sv_air_control: 120.0, // 32 * 150 из CPMA, переведено в м/с (40 единиц = 1 м)
+            sv_wall_jump_force: 6.5,
+            sv_wall_jump_push: 4.5,
         }
     }
 }
@@ -48,6 +54,12 @@ pub struct Jump {
     pub is_jumping: bool,
     pub can_jump: bool,
     pub jump_timer: f32,
+    /// Сколько ещё секунд действует нажатие прыжка для отскока от стены.
+    /// Позволяет нажать чуть раньше касания стены.
+    pub wall_jump_buffer: f32,
+    /// Нормаль стены последнего отскока. От той же стены второй раз до приземления не оттолкнуться,
+    /// иначе по одной стене можно было бы взбираться бесконечно.
+    pub last_wall_normal: Option<Vec3>,
 }
 
 impl Default for Jump {
@@ -56,12 +68,21 @@ impl Default for Jump {
             is_jumping: false,
             can_jump: true,
             jump_timer: 0.0,
+            wall_jump_buffer: 0.0,
+            last_wall_normal: None,
         }
     }
 }
 
 #[derive(Component)]
 pub struct PlayerCamera;
+
+const PLAYER_RADIUS: f32 = 0.3;
+/// На каком расстоянии от капсулы стена ещё считается касанием для отскока.
+const WALL_JUMP_REACH: f32 = 0.25;
+const WALL_JUMP_BUFFER: f32 = 0.15;
+/// Косинус угла между стенами, начиная с которого стена считается той же самой.
+const SAME_WALL_DOT: f32 = 0.7;
 
 #[derive(Bundle)]
 struct PlayerBundle {
@@ -116,7 +137,7 @@ pub fn spawn_player(
             transform: Transform::from_xyz(0.0, 3.0, 0.0), // Было 1.0, стало 3.0
             rigid_body: RigidBody::KinematicPositionBased,
             // Уменьшаем коллайдер для лучшей совместимости
-            collider: Collider::capsule_y(0.5, 0.3), // высота 0.5, радиус 0.3
+            collider: Collider::capsule_y(0.5, PLAYER_RADIUS), // высота 0.5, радиус 0.3
             friction: Friction::coefficient(0.0), // Убираем трение для Quake-физики
             restitution: Restitution::coefficient(0.0), // Убираем отскок
             gravity_scale: GravityScale(0.0), // Отключаем встроенную гравитацию, используем свою
@@ -171,9 +192,39 @@ fn debug_player_position(
     }
 }
 
+/// Ближайшая вертикальная неподвижная стена рядом с капсулой: её нормаль, направленная от стены.
+fn find_wall(rapier: &RapierContext, position: Vec3) -> Option<Vec3> {
+    const DIRECTIONS: usize = 8;
+    let reach = PLAYER_RADIUS + WALL_JUMP_REACH;
+    let mut best: Option<(f32, Vec3)> = None;
+    // Два уровня лучей: низкие перегородки и ящики не попадут в луч на высоте центра
+    for height in [0.0, -0.4] {
+        let origin = position + Vec3::Y * height;
+        for i in 0..DIRECTIONS {
+            let angle = i as f32 * std::f32::consts::TAU / DIRECTIONS as f32;
+            let dir = Vec3::new(angle.cos(), 0.0, angle.sin());
+            let Some((_, hit)) =
+                rapier.cast_ray_and_get_normal(origin, dir, reach, false, QueryFilter::only_fixed())
+            else {
+                continue;
+            };
+            let normal = hit.normal;
+            // Пол и потолок для отскока не годятся
+            if normal.y.abs() > 0.3 {
+                continue;
+            }
+            if best.is_none_or(|(toi, _)| hit.time_of_impact < toi) {
+                best = Some((hit.time_of_impact, Vec3::new(normal.x, 0.0, normal.z).normalize()));
+            }
+        }
+    }
+    best.map(|(_, normal)| normal)
+}
+
 pub fn apply_acceleration_cpma(
     time: Res<Time>,
     settings: Res<GameSettings>,
+    rapier: ReadRapierContext,
     mut query: Query<(
         &mut Velocity,
         &WishDirection,
@@ -252,6 +303,28 @@ pub fn apply_acceleration_cpma(
             vel.y = 0.0;
         }
 
+        // Прыжок от стены: в воздухе у стены, от которой ещё не отталкивались с последнего приземления
+        jump.wall_jump_buffer = (jump.wall_jump_buffer - dt).max(0.0);
+        if on_ground {
+            // Нажатие с земли - обычный прыжок, он не должен сразу же сработать как отскок от стены
+            jump.wall_jump_buffer = 0.0;
+            jump.last_wall_normal = None;
+        } else if jump.wall_jump_buffer > 0.0
+            && let Some(normal) = rapier.single().ok().and_then(|r| find_wall(&r, transform.translation))
+            && jump.last_wall_normal.is_none_or(|last| last.dot(normal) < SAME_WALL_DOT)
+        {
+            // Гасим движение в стену и отталкиваемся от неё, скорость вдоль стены сохраняется
+            let mut horizontal = Vec3::new(vel.x, 0.0, vel.z);
+            let into_wall = horizontal.dot(normal);
+            if into_wall < 0.0 {
+                horizontal -= normal * into_wall;
+            }
+            horizontal += normal * settings.sv_wall_jump_push;
+            vel = Vec3::new(horizontal.x, vel.y.max(settings.sv_wall_jump_force), horizontal.z);
+            jump.wall_jump_buffer = 0.0;
+            jump.last_wall_normal = Some(normal);
+        }
+
         // Обработка прыжка
         if on_ground {
             if jump.is_jumping && jump.can_jump {
@@ -319,6 +392,9 @@ pub fn handle_input(
 
         // Прыжок: зажатый пробел отталкивает сразу после приземления
         jump.is_jumping = keyboard.pressed(KeyCode::Space);
+        if keyboard.just_pressed(KeyCode::Space) {
+            jump.wall_jump_buffer = WALL_JUMP_BUFFER;
+        }
 
         wish_dir.0 = direction.normalize_or_zero();
         wish_speed.0 = if direction.length_squared() > 0.0 { settings.sv_maxspeed } else { 0.0 };
