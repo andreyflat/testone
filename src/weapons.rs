@@ -3,13 +3,16 @@ use bevy::prelude::*;
 use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
 use dummies::DamageSystems;
-use crate::enemies::{ENEMY_GROUP, ENEMY_HEIGHT, ENEMY_RADIUS, Enemy, EnemyHits, PLAYER_GROUP};
+use crate::enemies::{ENEMY_GROUP, ENEMY_HEIGHT, ENEMY_RADIUS, Enemy, EnemyHits, Health, PLAYER_GROUP, RAGDOLL_GROUP};
 use crate::lights::raytraced;
 use crate::player::{Player, PlayerCamera, Velocity as PlayerVelocity};
 
-/// Ствол ниже центра игрока. Выстрел без врага под прицелом идёт горизонтально на этой
-/// высоте: с пола на уровне ног, в прыжке - выше.
-const MUZZLE_OFFSET_Y: f32 = -0.32;
+/// Ствол на высоте плеча, над центром игрока (около 1.4 м над полом). Выстрел без врага
+/// под прицелом идёт горизонтально на этой высоте: с пола в грудь врагу и поверх ящиков.
+/// Ракета с такой высоты не стелется по полу на пути к дальней точке на нём.
+const MUZZLE_OFFSET_Y: f32 = 0.55;
+/// Удар перчаткой идёт ниже, от пояса: иначе в прыжке кулак оказывался бы выше врага.
+const PUNCH_OFFSET_Y: f32 = -0.32;
 /// Близко к игроку, иначе пуля появляется уже за врагом, стоящим вплотную.
 const MUZZLE_DISTANCE: f32 = 0.4;
 const PLAYER_RADIUS: f32 = 0.3;
@@ -39,8 +42,9 @@ const RAIL_TRAIL_DURATION: f32 = 0.5;
 const RAIL_TRAIL_RADIUS: f32 = 0.03;
 
 const ROCKET_DAMAGE: f32 = 100.0;
-/// Скорость ракеты: медленная, от неё можно увернуться.
-const ROCKET_SPEED: f32 = 10.0;
+const ROCKET_SPEED: f32 = 20.0;
+/// След ракеты: гаснущие огоньки, по одному на такой отрезок пути в метрах.
+const ROCKET_TRAIL_SPACING: f32 = 0.5;
 const ROCKET_SPLASH_RADIUS: f32 = 1.5;
 const ROCKET_LIFETIME: f32 = 6.0;
 /// Рокетджамп: скорость, которую взрыв вплотную придаёт игроку. Урона игроку взрыв не наносит.
@@ -109,6 +113,10 @@ pub struct Bullet {
     pub radius: f32,
     /// Радиус взрыва. Есть только у ракеты: она бьёт всех вокруг точки, куда упала.
     pub splash_radius: Option<f32>,
+    /// Сколько метров пролетел с последнего огонька следа. Есть только у ракеты.
+    pub trail: Option<f32>,
+    /// Пуля врага: летит сквозь врагов и ранит игрока.
+    pub hostile: bool,
 }
 
 /// Что находится под прицелом.
@@ -134,6 +142,30 @@ pub struct WeaponAssets {
     sphere_mesh: Handle<Mesh>,
     /// Цилиндр единичной длины вдоль Y для следа рейлгана.
     trail_mesh: Handle<Mesh>,
+    enemy_bullet_mesh: Handle<Mesh>,
+    enemy_bullet_material: Handle<StandardMaterial>,
+}
+
+/// Пуля врага: красная, меньше и медленнее пули игрока, от неё можно уйти.
+pub const ENEMY_BULLET_SPEED: f32 = 22.0;
+const ENEMY_BULLET_RADIUS: f32 = 0.08;
+const ENEMY_BULLET_DAMAGE: f32 = 5.0;
+
+/// Выпускает пулю врага из `position` в сторону `direction`.
+pub fn spawn_enemy_bullet(commands: &mut Commands, assets: &WeaponAssets, position: Vec3, direction: Vec3) {
+    commands.spawn((
+        projectile(assets.enemy_bullet_mesh.clone(), assets.enemy_bullet_material.clone(), position),
+        Bullet {
+            damage: ENEMY_BULLET_DAMAGE,
+            lifetime: BULLET_LIFETIME,
+            velocity: direction * ENEMY_BULLET_SPEED,
+            radius: ENEMY_BULLET_RADIUS,
+            splash_radius: None,
+            trail: None,
+            hostile: true,
+        },
+        Name::new("Enemy Bullet"),
+    ));
 }
 
 /// Светящийся эффект, который гаснет и исчезает. У каждого свой материал, чтобы гаснуть отдельно.
@@ -160,6 +192,16 @@ impl Flash {
             radius: splash_radius * 0.5,
             emissive: LinearRgba::rgb(1.0, 0.45, 0.1) * 40_000.0,
             duration: 0.3,
+        }
+    }
+
+    /// Огонёк в следе ракеты.
+    fn trail(position: Vec3) -> Self {
+        Self {
+            position,
+            radius: 0.09,
+            emissive: LinearRgba::rgb(1.0, 0.5, 0.15) * 6_000.0,
+            duration: 0.45,
         }
     }
 
@@ -191,6 +233,8 @@ fn setup_weapon_assets(
         rocket_material: glowing(LinearRgba::rgb(1.0, 0.35, 0.05) * 30_000.0),
         sphere_mesh: meshes.add(raytraced(Sphere::new(1.0).mesh().ico(2).unwrap())),
         trail_mesh: meshes.add(raytraced(Cylinder::new(RAIL_TRAIL_RADIUS, 1.0))),
+        enemy_bullet_mesh: meshes.add(raytraced(Sphere::new(ENEMY_BULLET_RADIUS).mesh().ico(0).unwrap())),
+        enemy_bullet_material: glowing(LinearRgba::rgb(1.0, 0.1, 0.05) * 20_000.0),
     });
 }
 
@@ -310,7 +354,8 @@ fn handle_shooting(
 
     match weapon.kind {
         WeaponKind::Gauntlet => {
-            punch(&mut commands, &assets, &mut materials, &enemies, &mut hits, muzzle, forward);
+            let fist = player_transform.translation + Vec3::Y * PUNCH_OFFSET_Y;
+            punch(&mut commands, &assets, &mut materials, &enemies, &mut hits, fist, forward);
         }
         WeaponKind::MachineGun => {
             commands.spawn((
@@ -325,6 +370,8 @@ fn handle_shooting(
                     velocity: shot * BULLET_SPEED,
                     radius: BULLET_RADIUS,
                     splash_radius: None,
+                    trail: None,
+                    hostile: false,
                 },
                 Name::new("Bullet"),
             ));
@@ -337,7 +384,7 @@ fn handle_shooting(
         }
         WeaponKind::RocketLauncher => {
             let start = muzzle + forward * MUZZLE_DISTANCE;
-            // Ракета летит по прямой к точке под прицелом, снижаясь к ней от ствола.
+            // Ракета летит по прямой к точке под прицелом, снижаясь к ней от плеча.
             // Враг на пути перехватит её раньше. Без точки под курсором - в пол в 10 м впереди.
             let target = aim.surface.unwrap_or(start.with_y(0.0) + forward * 10.0);
             let direction = (target - start).try_normalize().unwrap_or(forward);
@@ -353,6 +400,8 @@ fn handle_shooting(
                     velocity: direction * ROCKET_SPEED,
                     radius: ROCKET_RADIUS,
                     splash_radius: Some(ROCKET_SPLASH_RADIUS),
+                    trail: Some(0.0),
+                    hostile: false,
                 },
                 Name::new("Rocket"),
             ));
@@ -363,6 +412,11 @@ fn handle_shooting(
 /// Всё, кроме игрока: во что попадают снаряды и упирается прицел.
 fn not_player() -> CollisionGroups {
     CollisionGroups::new(Group::ALL, Group::ALL ^ PLAYER_GROUP)
+}
+
+/// Всё, кроме врагов и их тел: во что попадают пули врагов.
+fn not_enemies() -> CollisionGroups {
+    CollisionGroups::new(Group::ALL, Group::ALL ^ (ENEMY_GROUP | RAGDOLL_GROUP))
 }
 
 /// Вид снаряда. Физического тела у него нет: его двигает `fly_projectiles`.
@@ -383,7 +437,7 @@ fn fly_projectiles(
     rapier: ReadRapierContext,
     assets: Res<WeaponAssets>,
     mut bullets: Query<(Entity, &mut Bullet, &mut Transform)>,
-    mut player: Query<(&Transform, &mut PlayerVelocity), (With<Player>, Without<Bullet>)>,
+    mut player: Query<(Entity, &Transform, &mut PlayerVelocity, &mut Health), (With<Player>, Without<Bullet>)>,
     mut hits: EnemyHits,
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -408,20 +462,36 @@ fn fly_projectiles(
             stop_at_penetration: true,
             compute_impact_geometry_on_penetration: false,
         };
-        let filter = QueryFilter::new().exclude_sensors().groups(not_player());
+        let groups = if bullet.hostile { not_enemies() } else { not_player() };
+        let filter = QueryFilter::new().exclude_sensors().groups(groups);
         let shape = Collider::ball(bullet.radius);
         let Some((collider, hit)) = rapier.cast_shape(start, Quat::IDENTITY, direction, &shape, options, filter) else {
-            transform.translation = start + bullet.velocity * dt;
+            let step = bullet.velocity.length() * dt;
+            transform.translation = start + direction * step;
+            if let Some(travelled) = &mut bullet.trail {
+                *travelled += step;
+                if *travelled >= ROCKET_TRAIL_SPACING {
+                    *travelled = 0.0;
+                    spawn_flash(&mut commands, &assets, &mut materials, Flash::trail(start));
+                }
+            }
             continue;
         };
         commands.entity(entity).despawn();
         let position = start + direction * hit.time_of_impact;
 
-        if let Some(radius) = bullet.splash_radius {
+        if bullet.hostile {
+            if let Ok((player, _, _, mut health)) = player.single_mut()
+                && collider == player
+            {
+                health.take_damage(bullet.damage);
+                info!("Игрок получил урон от пули, здоровье: {}", health.current);
+            }
+        } else if let Some(radius) = bullet.splash_radius {
             // Ракета взрывается о любую поверхность и задевает всех врагов в радиусе
             spawn_flash(&mut commands, &assets, &mut materials, Flash::explosion(position, radius));
             hits.explode(position, radius, bullet.damage);
-            if let Ok((player, mut velocity)) = player.single_mut() {
+            if let Ok((_, player, mut velocity, _)) = player.single_mut() {
                 velocity.0 += blast_push(position, player.translation);
             }
         } else if let Some((body, part)) = hits.target(collider) {

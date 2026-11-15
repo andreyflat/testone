@@ -9,9 +9,12 @@ use bevy_rapier3d::prelude::*;
 use biped::Biped;
 use biped::body::Part;
 use dummies::{AnimateSystems, Animation, DamageSystems, DummiesPlugin, DummyAssets, Protection, Ragdoll, Steer, Struggle, spawn_dummy};
+use bevy::solari::prelude::RaytracingMesh3d;
+use crate::lights::raytraced;
+use crate::weapons::{ENEMY_BULLET_SPEED, WeaponAssets, spawn_enemy_bullet};
 use game_core::combat::{self, BodyPart, BodyPartKind, Damage};
 use crate::player::Player;
-use crate::world::{ARENA_HALF_SIZE, is_blocked, push_out};
+use crate::world::{ARENA_HALF_SIZE, detour, is_blocked, push_out};
 
 pub use game_core::collision::{ENEMY_GROUP, PLAYER_GROUP, RAGDOLL_GROUP};
 
@@ -29,6 +32,41 @@ const ARMOR_HEALTH: f32 = 100.0;
 const ARMOR_IMPACT: f32 = 0.3;
 const ARMORED_SPEED_FACTOR: f32 = 0.7;
 
+/// Скорость каждого врага - скорость волны, умноженная на случайное число из этого диапазона.
+const SPEED_VARIETY: (f32, f32) = (0.7, 1.4);
+/// Враг без автомата заходит к игроку сбоку: его путь отклонён от прямой на случайный угол
+/// до этого, в радианах. Ближе `FLANK_NEAR` метров он идёт прямо на игрока.
+const FLANK_ANGLE: f32 = 0.6;
+const FLANK_NEAR: f32 = 3.0;
+const FLANK_FAR: f32 = 9.0;
+
+/// Стрелки появляются с этой волны, каждый такой по счёту враг в волне.
+const GUNNER_FIRST_WAVE: u32 = 2;
+const GUNNER_EVERY: u32 = 4;
+/// Стрелок держится от игрока на таком расстоянии: дальше подходит, ближе пятится.
+const GUNNER_RANGE: (f32, f32) = (6.0, 11.0);
+/// Дальше этого стрелок не стреляет.
+const GUNNER_MAX_RANGE: f32 = 20.0;
+/// Увидев игрока, стрелок открывает огонь через столько секунд.
+const GUNNER_REACTION: f32 = 0.6;
+/// Очередь: столько пуль с таким интервалом, потом пауза из этого диапазона, секунды.
+const GUNNER_BURST: u32 = 4;
+const GUNNER_SHOT_INTERVAL: f32 = 0.13;
+const GUNNER_PAUSE: (f32, f32) = (1.4, 2.6);
+/// Разброс пуль стрелка: до стольких радиан в каждую сторону.
+const GUNNER_SPREAD: f32 = 0.05;
+/// Какую долю упреждения по движению игрока берёт стрелок: при полном он попадал бы почти
+/// всегда, без него - никогда не попадал бы по бегущему.
+const GUNNER_LEAD: f32 = 0.5;
+/// Пятясь, стрелок идёт медленнее: такая доля его скорости.
+const GUNNER_RETREAT: f32 = 0.6;
+/// Автомат стрелка: размеры и где дульный срез относительно начала оружия (оно смотрит вдоль -Z).
+const GUN_SIZE: Vec3 = Vec3::new(0.05, 0.09, 0.5);
+const GUN_CENTER: Vec3 = Vec3::new(0.0, 0.0, -0.18);
+const GUN_MUZZLE: Vec3 = Vec3::new(0.0, 0.0, -0.45);
+/// Игрок как цель: настолько выше его центра стрелок целится (в грудь).
+const PLAYER_AIM_Y: f32 = 0.2;
+
 // Обход препятствий: враг, который почти не сдвинулся за время проверки, шагает вбок
 const STUCK_CHECK_INTERVAL: f32 = 0.5;
 const STUCK_MOVED_FRACTION: f32 = 0.25;
@@ -44,9 +82,13 @@ const WAVE_DELAY: f32 = 2.0;
 /// Ближе этого к игроку враг не появляется, даже когда игрок стоит в углу арены.
 const MIN_SPAWN_DISTANCE: f32 = 7.0;
 
-/// Обмякшее тело через столько секунд застывает: каждое - 14 связанных суставами
-/// твёрдых тел, считать их физику весь забег слишком дорого.
-const CORPSE_FREEZE: f32 = 4.0;
+
+
+/// Тело прошлой волны застывает, пролежав столько секунд неподвижно: ни одна его часть
+/// не движется быстрее этой скорости, м/с, и не вращается быстрее этой, рад/с.
+const CORPSE_STILL_TIME: f32 = 1.5;
+const CORPSE_STILL_SPEED: f32 = 0.15;
+const CORPSE_STILL_SPIN: f32 = 1.0;
 
 /// Взрыв отбрасывает части тела с такой скоростью вплотную к центру, м/с.
 const BLAST_SPEED: f32 = 14.0;
@@ -56,10 +98,12 @@ impl Plugin for EnemiesPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(DummiesPlugin)
             .init_resource::<WaveState>()
+            .add_systems(Startup, setup_gun_assets)
             .add_systems(Update, (
                 wave_system,
                 track_enemies,
                 steer_enemies.before(AnimateSystems),
+                gunners_fire,
                 enemy_contact_damage,
                 player_death_system,
             ).chain())
@@ -95,6 +139,45 @@ pub struct Enemy {
     pub position: Vec3,
     /// На ногах и под управлением анимации: не сбит с ног и не шатается от удара.
     pub standing: bool,
+    /// На какой угол его путь к игроку отклонён от прямой: так враги заходят с разных сторон.
+    pub flank: f32,
+}
+
+/// Враг с автоматом: держит дистанцию и стреляет очередями, пока видит игрока.
+#[derive(Component)]
+pub struct Gunner {
+    /// Автомат в его руках.
+    gun: Entity,
+    /// Между ним и игроком нет стен, и игрок в пределах дальности.
+    sees: bool,
+    /// Сколько секунд подряд он видит игрока.
+    sight: f32,
+    /// Сколько пуль осталось в очереди и сколько секунд до следующей пули или очереди.
+    burst_left: u32,
+    wait: f32,
+}
+
+/// Меш и материал автомата стрелков.
+#[derive(Resource)]
+struct GunAssets {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
+fn setup_gun_assets(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(GunAssets {
+        mesh: meshes.add(raytraced(Cuboid::from_size(GUN_SIZE)).translated_by(GUN_CENTER)),
+        material: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.05, 0.05, 0.06),
+            perceptual_roughness: 0.9,
+            metallic: 0.0,
+            ..default()
+        }),
+    });
 }
 
 /// Броня бронированного врага. Пока она цела, тело неуязвимо.
@@ -105,10 +188,13 @@ pub struct ArmorPlating {
     pub pieces: Vec<Entity>,
 }
 
-/// Тело убитого врага: сколько секунд оно уже лежит обмякшим.
+/// Тело убитого врага.
 #[derive(Component)]
 pub struct Corpse {
-    limp_for: f32,
+    /// Тело осталось с прошлой волны и застынет, как только уляжется.
+    stale: bool,
+    /// Сколько секунд подряд тело лежит неподвижно.
+    still_for: f32,
     /// Тело застыло: физика его больше не считает.
     frozen: bool,
 }
@@ -143,7 +229,8 @@ pub struct EnemyHits<'w, 's> {
     body_parts: Query<'w, 's, (&'static ChildOf, &'static BodyPart)>,
     armor_pieces: Query<'w, 's, (&'static combat::Armor, &'static ChildOf)>,
     platings: Query<'w, 's, &'static mut ArmorPlating>,
-    bipeds: Query<'w, 's, (Entity, &'static Biped)>,
+    /// Тела врагов, живых и убитых. Тело игрока сюда не входит: взрывы его не задевают.
+    bipeds: Query<'w, 's, (Entity, &'static Biped), Or<(With<Enemy>, With<Corpse>)>>,
     places: Query<'w, 's, &'static GlobalTransform>,
     impulses: Query<'w, 's, &'static mut ExternalImpulse, With<BodyPart>>,
 }
@@ -255,6 +342,7 @@ fn wave_system(
     mut wave_state: ResMut<WaveState>,
     mut commands: Commands,
     assets: Res<DummyAssets>,
+    guns: Res<GunAssets>,
     enemies: Query<(), With<Enemy>>,
     player: Query<&Transform, With<Player>>,
 ) {
@@ -290,9 +378,32 @@ fn wave_system(
         } else {
             ("Enemy", Protection::None, speed)
         };
+        let speed = speed * (SPEED_VARIETY.0 + fastrand::f32() * (SPEED_VARIETY.1 - SPEED_VARIETY.0));
         let spawned = spawn_dummy(&mut commands, &assets, name, protection, position, facing);
+        if wave >= GUNNER_FIRST_WAVE && i % GUNNER_EVERY == GUNNER_EVERY - 1 {
+            // Автомат - дочерний объект тела: анимация каждый кадр говорит, где его держат руки
+            let gun = commands
+                .spawn((
+                    Mesh3d(guns.mesh.clone()),
+                    RaytracingMesh3d(guns.mesh.clone()),
+                    MeshMaterial3d(guns.material.clone()),
+                    Transform::default(),
+                    Visibility::Hidden,
+                    ChildOf(spawned.dummy),
+                    Name::new("Enemy Gun"),
+                ))
+                .id();
+            commands.entity(spawned.dummy).insert(Gunner {
+                gun,
+                sees: false,
+                sight: 0.0,
+                burst_left: 0,
+                wait: GUNNER_PAUSE.0,
+            });
+        }
         let mut enemy = commands.entity(spawned.dummy);
         enemy.insert(Enemy {
+            flank: (fastrand::f32() * 2.0 - 1.0) * FLANK_ANGLE,
             speed,
             attack_cooldown: 0.0,
             stuck_timer: STUCK_CHECK_INTERVAL,
@@ -364,22 +475,32 @@ fn track_enemies(
 /// Ведёт врагов к игроку. Идёт и поворачивается сама анимация, сюда она отдаёт только
 /// направление и скорость. Стен для анимированного тела нет, поэтому из них и друг из друга
 /// врагов выталкивает этот же код.
+///
+/// Блок на пути враг обходит через ближайший угол. Без автомата он заходит к игроку сбоку,
+/// каждый под своим углом, чтобы не идти гуськом. С автоматом держит дистанцию: подходит,
+/// пока не увидит игрока вблизи, и пятится, когда тот подбегает.
 fn steer_enemies(
     time: Res<Time>,
+    rapier: ReadRapierContext,
     player: Query<&Transform, With<Player>>,
-    mut enemies: Query<(Entity, &mut Enemy, &mut Animation, &Transform), Without<Player>>,
+    mut enemies: Query<(Entity, &mut Enemy, &mut Animation, &Transform, Option<&mut Gunner>), Without<Player>>,
     mut crowd: Local<Vec<(Entity, Vec3)>>,
 ) {
     let Ok(player) = player.single() else {
         return;
     };
+    let rapier = rapier.single().ok();
     let dt = time.delta_secs();
 
     crowd.clear();
-    for (entity, mut enemy, mut animation, origin) in enemies.iter_mut() {
+    for (entity, mut enemy, mut animation, origin, mut gunner) in enemies.iter_mut() {
         if !enemy.standing {
             // Телом владеет физика: враг шатается или лежит, пока не оправится
             animation.steer.speed = 0.0;
+            if let Some(gunner) = gunner.as_mut() {
+                gunner.sees = false;
+                gunner.sight = 0.0;
+            }
             continue;
         }
         // Анимация считает положение от точки появления врага
@@ -387,11 +508,12 @@ fn steer_enemies(
         let flat_offset = (player.translation - position).with_y(0.0);
         let distance = flat_offset.length();
         let direction = flat_offset.normalize_or_zero();
+        let facing = (direction != Vec3::ZERO).then(|| direction.x.atan2(direction.z));
 
         enemy.stuck_timer -= dt;
         if enemy.stuck_timer <= 0.0 {
             let moved = position.distance(enemy.last_position);
-            let expected = enemy.speed * STUCK_CHECK_INTERVAL;
+            let expected = animation.pace() * STUCK_CHECK_INTERVAL;
             if moved < expected * STUCK_MOVED_FRACTION
                 && distance > NEAR_PLAYER_DISTANCE
                 && enemy.sidestep_timer <= 0.0
@@ -403,19 +525,62 @@ fn steer_enemies(
             enemy.last_position = position;
         }
 
-        let heading = if enemy.sidestep_timer > 0.0 {
+        // Куда идти, чтобы подойти к игроку: в обход блока, вбок, если застрял, или напрямик
+        let around = detour(position, player.translation, ENEMY_RADIUS);
+        let approach = if enemy.sidestep_timer > 0.0 {
             enemy.sidestep_timer -= dt;
             Vec3::new(-direction.z, 0.0, direction.x) * enemy.sidestep_side
+        } else if let Some(corner) = around {
+            (corner - position).with_y(0.0).normalize_or_zero()
         } else {
             direction
         };
-        // Вплотную к игроку останавливается и только поворачивается к нему, а не входит в него
-        let reached = distance < (ENEMY_RADIUS + PLAYER_RADIUS) * 0.8;
-        animation.steer = Steer {
-            speed: if reached { 0.0 } else { enemy.speed },
-            heading: (heading != Vec3::ZERO).then(|| heading.x.atan2(heading.z)),
-            floor: Some(0.0),
-            ..default()
+
+        animation.steer = if let Some(gunner) = gunner.as_mut() {
+            // Видит игрока, если до него недалеко и между ними нет стен
+            let eyes = position + Vec3::Y * 1.5;
+            let target = player.translation + Vec3::Y * PLAYER_AIM_Y;
+            let line = target - eyes;
+            gunner.sees = distance < GUNNER_MAX_RANGE
+                && rapier.as_ref().is_some_and(|rapier| {
+                    rapier
+                        .cast_ray(eyes, line.normalize_or_zero(), line.length(), true, QueryFilter::only_fixed())
+                        .is_none()
+                });
+            gunner.sight = if gunner.sees { gunner.sight + dt } else { 0.0 };
+
+            animation.armed = true;
+            let aim = gunner.sees.then(|| (line.y / distance.max(0.1)).atan());
+            let away = facing.map(|facing| dummies::wrap_angle(facing + std::f32::consts::PI));
+            let travel = |way: Vec3| (way != Vec3::ZERO).then(|| way.x.atan2(way.z));
+            let (speed, travel) = if !gunner.sees || distance > GUNNER_RANGE.1 {
+                // Подходит, пока не увидит игрока достаточно близко
+                (enemy.speed, travel(approach))
+            } else if distance < GUNNER_RANGE.0 {
+                // Пятится лицом к игроку
+                (enemy.speed * GUNNER_RETREAT, away)
+            } else {
+                (0.0, None)
+            };
+            // Пока видит - смотрит на игрока и идёт боком или спиной, иначе смотрит, куда идёт
+            let heading = if gunner.sees { facing } else { travel.or(facing) };
+            Steer { speed, heading, travel: if gunner.sees { travel } else { None }, aim, floor: Some(0.0), ..default() }
+        } else {
+            // Заход сбоку: чем дальше от игрока, тем сильнее путь отклонён от прямой
+            let swing = ((distance - FLANK_NEAR) / (FLANK_FAR - FLANK_NEAR)).clamp(0.0, 1.0);
+            let heading = if around.is_none() && enemy.sidestep_timer <= 0.0 {
+                Quat::from_rotation_y(enemy.flank * swing) * approach
+            } else {
+                approach
+            };
+            // Вплотную к игроку останавливается и только поворачивается к нему, а не входит в него
+            let reached = distance < (ENEMY_RADIUS + PLAYER_RADIUS) * 0.8;
+            Steer {
+                speed: if reached { 0.0 } else { enemy.speed },
+                heading: if reached { facing } else { (heading != Vec3::ZERO).then(|| heading.x.atan2(heading.z)) },
+                floor: Some(0.0),
+                ..default()
+            }
         };
 
         let kept = push_out(position, ENEMY_RADIUS);
@@ -440,11 +605,66 @@ fn steer_enemies(
             }
         }
         if push != Vec3::ZERO
-            && let Ok((_, _, mut animation, _)) = enemies.get_mut(crowd[i].0)
+            && let Ok((_, _, mut animation, _, _)) = enemies.get_mut(crowd[i].0)
         {
             // Не всё сразу: резкий сдвиг был бы виден как рывок
             animation.nudge(push * (10.0 * dt).min(1.0));
         }
+    }
+}
+
+/// Стрелки держат автомат там, где его держат руки в анимации, и стреляют короткими очередями,
+/// пока видят игрока: не сразу, а через `GUNNER_REACTION`, и с паузами между очередями.
+/// Сбитый с ног или потерявший игрока из виду стрелок не стреляет, очередь обрывается.
+fn gunners_fire(
+    time: Res<Time>,
+    assets: Res<WeaponAssets>,
+    player: Query<(&Transform, &crate::player::Velocity), With<Player>>,
+    mut gunners: Query<(&Enemy, &mut Gunner, &Animation, &Transform), Without<Player>>,
+    mut guns: Query<(&mut Transform, &mut Visibility), (Without<Enemy>, Without<Player>)>,
+    mut commands: Commands,
+) {
+    let Ok((player, player_velocity)) = player.single() else {
+        return;
+    };
+    let dt = time.delta_secs();
+    for (enemy, mut gunner, animation, origin) in gunners.iter_mut() {
+        let pose = animation.gun_pose();
+        if let Ok((mut gun, mut visibility)) = guns.get_mut(gunner.gun) {
+            *gun = pose;
+            // У сбитого с ног автомат прячется: анимация его не держит
+            *visibility = if enemy.standing { Visibility::Inherited } else { Visibility::Hidden };
+        }
+
+        gunner.wait = (gunner.wait - dt).max(0.0);
+        if !enemy.standing || !gunner.sees {
+            gunner.burst_left = 0;
+            continue;
+        }
+        if gunner.sight < GUNNER_REACTION || gunner.wait > 0.0 || animation.aiming() < 0.9 {
+            continue;
+        }
+        if gunner.burst_left == 0 {
+            gunner.burst_left = GUNNER_BURST;
+        }
+
+        let muzzle = origin.translation + pose.transform_point(GUN_MUZZLE);
+        // Целится с упреждением: туда, где игрок окажется, когда долетит пуля
+        let target = player.translation + Vec3::Y * PLAYER_AIM_Y;
+        let lead = player_velocity.0.with_y(0.0) * (muzzle.distance(target) / ENEMY_BULLET_SPEED) * GUNNER_LEAD;
+        let Some(direction) = (target + lead - muzzle).try_normalize() else {
+            continue;
+        };
+        let spread = |amount: f32| (fastrand::f32() * 2.0 - 1.0) * amount;
+        let direction = Quat::from_rotation_y(spread(GUNNER_SPREAD)) * direction + Vec3::Y * spread(GUNNER_SPREAD * 0.5);
+        spawn_enemy_bullet(&mut commands, &assets, muzzle, direction.normalize());
+
+        gunner.burst_left -= 1;
+        gunner.wait = if gunner.burst_left > 0 {
+            GUNNER_SHOT_INTERVAL
+        } else {
+            GUNNER_PAUSE.0 + fastrand::f32() * (GUNNER_PAUSE.1 - GUNNER_PAUSE.0)
+        };
     }
 }
 
@@ -479,34 +699,51 @@ fn enemy_contact_damage(
 /// Убитый враг перестаёт быть врагом: волна его больше не ждёт, а тело доживает как рэгдолл.
 fn bury_dead(
     mut commands: Commands,
-    enemies: Query<(Entity, &Ragdoll), With<Enemy>>,
+    enemies: Query<(Entity, &Ragdoll, Option<&Gunner>), With<Enemy>>,
 ) {
-    for (entity, ragdoll) in enemies.iter() {
+    for (entity, ragdoll, gunner) in enemies.iter() {
         if ragdoll.dead() {
+            // Автомат убитого исчезает
+            if let Some(gunner) = gunner {
+                commands.entity(gunner.gun).try_despawn();
+            }
             commands
                 .entity(entity)
-                .remove::<(Enemy, ArmorPlating)>()
-                .insert(Corpse { limp_for: 0.0, frozen: false });
+                .remove::<(Enemy, ArmorPlating, Gunner)>()
+                .insert(Corpse { stale: false, still_for: 0.0, frozen: false });
         }
     }
 }
 
-/// Тела остаются лежать насовсем. Обмякшее тело через `CORPSE_FREEZE` застывает: физика
-/// перестаёт его считать, а снаряды и прицел проходят сквозь него. Иначе сотни тел за забег
+/// Тела остаются лежать насовсем. До начала следующей волны они живут в физике: их
+/// разбрасывают взрывы и толкают попадания. С новой волной тела прошлой застывают, как только
+/// пролежат неподвижно `CORPSE_STILL_TIME`: физика
+/// перестаёт их считать, а снаряды и прицел проходят сквозь них. Иначе сотни тел за забег
 /// тормозили бы игру и ловили бы пули вместо живых врагов.
 fn freeze_corpses(
-    time: Res<Time>,
+    wave_state: Res<WaveState>,
     mut commands: Commands,
     mut corpses: Query<(&mut Corpse, &Biped, Has<Struggle>)>,
     children: Query<&Children>,
+    velocities: Query<&Velocity>,
+    time: Res<Time>,
+    mut seen_wave: Local<u32>,
 ) {
+    let new_wave = wave_state.wave != *seen_wave;
+    *seen_wave = wave_state.wave;
     for (mut corpse, biped, struggling) in corpses.iter_mut() {
-        // Пока тело борется, оно не лежит
-        if corpse.frozen || struggling {
+        corpse.stale |= new_wave;
+        if corpse.frozen {
             continue;
         }
-        corpse.limp_for += time.delta_secs();
-        if corpse.limp_for < CORPSE_FREEZE {
+        // Застывает только тело, которое улеглось: летящее от взрыва или ещё борющееся
+        // иначе повисло бы в воздухе
+        let moving = struggling
+            || biped.parts.iter().filter_map(|&part| velocities.get(part).ok()).any(|velocity| {
+                velocity.linear.length() > CORPSE_STILL_SPEED || velocity.angular.length() > CORPSE_STILL_SPIN
+            });
+        corpse.still_for = if moving { 0.0 } else { corpse.still_for + time.delta_secs() };
+        if !corpse.stale || corpse.still_for < CORPSE_STILL_TIME {
             continue;
         }
         corpse.frozen = true;

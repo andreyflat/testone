@@ -41,6 +41,12 @@ pub const RUN_SPEED: f32 = 4.0;
 const RUN_STRIDE_LENGTH: f32 = 2.3;
 const RUN_SWING: f32 = 0.6;
 const RUN_LEAN: f32 = 0.14;
+/// Told it is in the air, it eases into its jump pose and back out at this rate, in fractions per
+/// second: one leg tucked up high, the other less so, knees bent.
+const AIR_RATE: f32 = 9.0;
+const JUMP_THIGHS: [f32; 2] = [-1.0, -0.35];
+const JUMP_KNEES: [f32; 2] = [1.3, 0.8];
+const JUMP_FEET: [f32; 2] = [0.2, 0.3];
 /// Armed, it holds the gun's grip this far in front of its chest, and this far below its
 /// shoulders, when not aiming, tipped down this far, in radians...
 const LOW_READY_GRIP: Vec3 = Vec3::new(0.06, -0.32, 0.32);
@@ -149,6 +155,8 @@ pub struct Animation {
     aim_pitch: f32,
     /// How far it is leaning, in radians, positive towards its -X side.
     lean: f32,
+    /// How far into its jump pose it is, from 0 to 1.
+    air: f32,
     /// How much longer it is signalling by hand for, in seconds.
     signalling: f32,
     /// Where it held the gun last step, in the dummy's space.
@@ -174,6 +182,11 @@ pub struct Steer {
     /// How far to lean its upper body over to the side from the hips, in radians: positive towards
     /// its -X side.
     pub lean: f32,
+    /// In the air: it stops stepping and holds its jump pose.
+    pub airborne: bool,
+    /// Something else moves it about (see `Animation::place`): it steps on the spot at the speed
+    /// it is told rather than walking itself along.
+    pub carried: bool,
 }
 
 impl Animation {
@@ -206,6 +219,7 @@ impl Animation {
             aiming: 0.0,
             aim_pitch: 0.0,
             lean: 0.0,
+            air: 0.0,
             signalling: 0.0,
             gun: Transform::IDENTITY,
         }
@@ -219,6 +233,12 @@ impl Animation {
 
     pub fn facing(&self) -> f32 {
         yaw(self.root.rotation)
+    }
+
+    /// Puts it at `position` facing `facing`, an angle about the vertical, in the dummy's space,
+    /// at once: for a body that something else moves about, such as the player's.
+    pub fn place(&mut self, position: Vec3, facing: f32) {
+        self.root = Transform::from_translation(position).with_rotation(Quat::from_rotation_y(facing));
     }
 
     /// Moves where it stands by `offset`, in the dummy's space, at once: for whatever keeps it
@@ -280,7 +300,7 @@ impl Animation {
                 let mut local = Part::ALL.map(|part| {
                     chain_pose(part, |part| {
                         let walk = walk_angle(part, phase) * if part.is_leg() { off } else { 1.0 };
-                        swing * walk + idling * idle_angle(part, t)
+                        swing * walk + idling * idle_angle(part, t) + self.air * jump_angle(part)
                     })
                 });
                 // Its legs turned the way it walks.
@@ -307,7 +327,8 @@ impl Animation {
     /// How far it has eased from standing into walking, from 0 to 1, and how far its limbs swing
     /// as it goes, as a fraction of walking.
     fn gait(&self) -> (f32, f32) {
-        let walking = (self.pace / WALK_SPEED).clamp(0.0, 1.0);
+        // In the air it doesn't step.
+        let walking = (self.pace / WALK_SPEED).clamp(0.0, 1.0) * (1.0 - self.air);
         (walking, walking * (1.0 + RUN_SWING * self.running()))
     }
 
@@ -571,7 +592,11 @@ impl Animation {
         let walked_off = wrap_angle(way - self.heading_walked);
         self.heading_walked += walked_off.clamp(-TURN_RATE * dt, TURN_RATE * dt);
         let forward = Quat::from_rotation_y(self.heading_walked) * Vec3::Z;
-        self.root.translation += forward * self.pace * dt;
+        if !self.steer.carried {
+            self.root.translation += forward * self.pace * dt;
+        }
+        let air = if self.steer.airborne { 1.0 } else { 0.0 };
+        self.air += (air - self.air).clamp(-AIR_RATE * dt, AIR_RATE * dt);
         self.walked += self.pace * dt;
         let stride = STRIDE_LENGTH.lerp(RUN_STRIDE_LENGTH, self.running());
         self.stride = (self.stride + self.pace * dt / stride * 2.0 * PI) % (2.0 * PI);
@@ -663,6 +688,20 @@ fn walk_angle(part: Part, phase: f32) -> f32 {
         Part::LeftFoot | Part::RightFoot => -(thigh + knee),
         Part::LeftUpperArm | Part::RightUpperArm => ARM_SWING * phase.sin(),
         Part::LeftForearm | Part::RightForearm => -ELBOW_BEND,
+        _ => 0.0,
+    }
+}
+
+/// How far the named part is turned about its joint in the jump pose, in radians about the
+/// sideways axis: the left leg tucked higher than the right.
+fn jump_angle(part: Part) -> f32 {
+    match part {
+        Part::LeftThigh => JUMP_THIGHS[0],
+        Part::RightThigh => JUMP_THIGHS[1],
+        Part::LeftShin => JUMP_KNEES[0],
+        Part::RightShin => JUMP_KNEES[1],
+        Part::LeftFoot => JUMP_FEET[0],
+        Part::RightFoot => JUMP_FEET[1],
         _ => 0.0,
     }
 }

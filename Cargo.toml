@@ -11,6 +11,7 @@ bevy_rapier3d = "0.37.0"
 biped = { path = "crates/biped" }
 dummies = { path = "crates/dummies" }
 game_core = { path = "crates/game_core" }
+fastrand = "2"
 
 [workspace]
 resolver = "2"

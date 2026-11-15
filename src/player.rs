@@ -2,6 +2,7 @@
 use bevy::prelude::*;
 use bevy::input::keyboard::KeyCode;
 use bevy_rapier3d::prelude::*;
+use dummies::{AnimateSystems, Animation, DummyAssets, Protection, Steer, spawn_dummy};
 use crate::enemies::{ENEMY_GROUP, Health, PLAYER_GROUP, PLAYER_MAX_HEALTH, RAGDOLL_GROUP};
 use crate::world::ARENA_HALF_SIZE;
 
@@ -100,9 +101,21 @@ struct PlayerBundle {
     gravity_scale: GravityScale,
     locked_axes: LockedAxes,
     damping: Damping,
-    mesh: Mesh3d,
-    material: MeshMaterial3d<StandardMaterial>,
 }
+
+/// Видимое тело игрока: та же модель из коробок, что у врагов, только синяя.
+/// Капсула игрока двигается физикой, а тело каждый кадр ставится туда, где она стоит.
+#[derive(Component)]
+pub struct PlayerBody;
+
+/// От центра капсулы игрока до пола под ней: половина цилиндра, радиус и зазор контроллера.
+const PLAYER_FEET: f32 = 0.5 + PLAYER_RADIUS + 0.02;
+/// Медленнее этого тело стоит, а не шагает.
+const BODY_WALK_MIN_SPEED: f32 = 0.3;
+/// Быстрее этого ноги не шагают, как бы быстро ни двигался игрок.
+const BODY_MAX_GAIT_SPEED: f32 = 3.0;
+/// Столько секунд без опоры под ногами - и тело переходит в позу прыжка.
+const BODY_AIR_DELAY: f32 = 0.08;
 
 pub struct PlayerPlugin;
 
@@ -118,15 +131,35 @@ impl Plugin for PlayerPlugin {
                 ).chain(),
                 debug_player_position,
                 emergency_respawn,
+                pose_player_body.before(AnimateSystems),
             ));
     }
 }
 
 pub fn spawn_player(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Res<DummyAssets>,
 ) {
+    // Тело стоит в начале координат и не повёрнуто: его положение задаёт анимация
+    let body = spawn_dummy(&mut commands, &assets, "Player Body", Protection::None, Vec3::ZERO, 0.0);
+    commands.entity(body.dummy).insert(PlayerBody);
+    // Матовый синий, без свечения: тело видно в свете фонаря и ламп
+    let suit = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.08, 0.22, 0.75),
+        perceptual_roughness: 0.9,
+        metallic: 0.0,
+        ..default()
+    });
+    for part in biped::body::Part::ALL {
+        let mut entity = commands.entity(body.parts[part.index()]);
+        // Части тела ни с чем не сталкиваются, а прицел и снаряды игрока их не видят
+        entity.insert(CollisionGroups::new(PLAYER_GROUP, Group::NONE));
+        if !matches!(part, biped::body::Part::Head | biped::body::Part::Neck) {
+            entity.insert(MeshMaterial3d(suit.clone()));
+        }
+    }
+
     let player = commands
         .spawn(PlayerBundle {
             player: Player,
@@ -147,16 +180,6 @@ pub fn spawn_player(
                 linear_damping: 0.0, // Убираем демпфирование
                 angular_damping: 1.0,
             },
-            // Визуальная капсула - больше коллайдера для лучшей видимости
-            mesh: Mesh3d(meshes.add(Capsule3d::new(0.3, 1.0))), // немного меньше
-            material: MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.1, 0.3, 1.0), // Яркий синий
-                // Силуэт в темноте. Меш не участвует в трассировке, поэтому не тратит сэмплы света
-                emissive: LinearRgba::rgb(10.0, 10.0, 30.0),
-                metallic: 0.0,
-                perceptual_roughness: 0.5,
-                ..default()
-            })),
         })
         .id();
 
@@ -164,6 +187,8 @@ pub fn spawn_player(
     let groups = CollisionGroups::new(PLAYER_GROUP, Group::ALL ^ (ENEMY_GROUP | RAGDOLL_GROUP));
     commands.entity(player)
         .insert(Health::new(PLAYER_MAX_HEALTH))
+        // Сам игрок не рисуется, но на нём висит фонарь
+        .insert(Visibility::default())
         .insert(groups)
         .insert(KinematicCharacterController {
             filter_groups: Some(groups), // Контроллер не упирается во врагов
@@ -180,6 +205,50 @@ pub fn spawn_player(
             }),
             ..default()
         });
+}
+
+/// Ставит тело игрока под капсулу и поворачивает его туда же, куда смотрит игрок.
+/// На земле тело шагает в сторону движения, в воздухе поджимает ноги.
+fn pose_player_body(
+    time: Res<Time>,
+    player: Query<(&Transform, &Velocity, Option<&KinematicCharacterControllerOutput>), With<Player>>,
+    mut body: Query<&mut Animation, With<PlayerBody>>,
+    mut off_ground: Local<f32>,
+) {
+    let (Ok((transform, velocity, output)), Ok(mut animation)) = (player.single(), body.single_mut()) else {
+        return;
+    };
+    let dt = time.delta_secs();
+    // Тело смотрит вдоль своей оси +Z, игрок - вдоль -Z
+    let forward = transform.rotation * Vec3::NEG_Z;
+    // Капсулу физика сдвинет в конце кадра, поэтому тело ставится туда, где она окажется:
+    // иначе оно отставало бы на кадр и дрожало бы вместе с длиной кадра
+    let feet = transform.translation - Vec3::Y * PLAYER_FEET + velocity.0 * dt;
+    animation.place(feet, forward.x.atan2(forward.z));
+
+    // Контроллер на ровном полу то и дело теряет опору на кадр, поэтому в воздухе
+    // игрок считается только после паузы
+    if output.is_some_and(|output| output.grounded) {
+        *off_ground = 0.0;
+    } else {
+        *off_ground += dt;
+    }
+    let airborne = *off_ground > BODY_AIR_DELAY;
+
+    let moving = velocity.0.with_y(0.0);
+    let speed = moving.length();
+    let walking = !airborne && speed > BODY_WALK_MIN_SPEED;
+    // Руки держат оружие перед собой
+    animation.armed = true;
+    animation.steer = Steer {
+        // Игрок вдвое быстрее бегущего врага. Ноги шагают не чаще, чем при беге, иначе тело
+        // мельтешит и подпрыгивает на каждом шаге
+        speed: if walking { speed.min(BODY_MAX_GAIT_SPEED) } else { 0.0 },
+        travel: walking.then(|| moving.x.atan2(moving.z)),
+        airborne,
+        carried: true,
+        ..default()
+    };
 }
 
 // Система отладки позиции игрока

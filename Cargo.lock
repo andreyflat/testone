@@ -5893,6 +5893,7 @@ dependencies = [
  "bevy_rapier3d",
  "biped",
  "dummies",
+ "fastrand",
  "game_core",
 ]
 

@@ -139,6 +139,59 @@ pub fn is_blocked(position: Vec3, margin: f32) -> bool {
         })
 }
 
+/// Где отрезок на полу входит в прямоугольник с центром `center` и полуразмерами `half`,
+/// как доля длины отрезка от 0 до 1, если входит.
+fn segment_enters(from: Vec2, to: Vec2, center: Vec2, half: Vec2) -> Option<f32> {
+    let delta = to - from;
+    let (mut enter, mut leave) = (0.0_f32, 1.0_f32);
+    for axis in 0..2 {
+        let (low, high) = (center[axis] - half[axis], center[axis] + half[axis]);
+        if delta[axis].abs() < 1e-6 {
+            if from[axis] <= low || from[axis] >= high {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = ((low - from[axis]) / delta[axis], (high - from[axis]) / delta[axis]);
+        enter = enter.max(a.min(b));
+        leave = leave.min(a.max(b));
+    }
+    (enter < leave).then_some(enter)
+}
+
+/// Куда идти кругу радиуса `radius` из `from`, чтобы попасть в `to`, если прямой путь
+/// загораживает блок уровня: к тому углу блока, через который путь короче. Если путь
+/// свободен, возвращает `None`. Высота не учитывается.
+pub fn detour(from: Vec3, to: Vec3, radius: f32) -> Option<Vec3> {
+    let (start, goal) = (Vec2::new(from.x, from.z), Vec2::new(to.x, to.z));
+    // Чуть меньше радиуса: стоящий вплотную к блоку не считается стоящим внутри него
+    let grown = Vec2::splat(radius * 0.9);
+    let footprint = |b: &Block| (Vec2::new(b.center.x, b.center.z), Vec2::new(b.half.x, b.half.z));
+    let (block, _) = LEVEL
+        .iter()
+        .filter_map(|b| {
+            let (center, half) = footprint(b);
+            segment_enters(start, goal, center, half + grown).map(|at| (b, at))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+
+    let (center, half) = footprint(block);
+    // Угол с запасом, чтобы, дойдя до него, увидеть путь дальше
+    let reach = half + Vec2::splat(radius + 0.25);
+    [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+        .into_iter()
+        .map(|(x, z)| center + reach * Vec2::new(x, z))
+        .filter(|&corner| {
+            segment_enters(start, corner, center, half + grown).is_none()
+                && !is_blocked(Vec3::new(corner.x, 0.0, corner.y), radius * 0.9)
+        })
+        .min_by(|a, b| {
+            let cost = |corner: &Vec2| start.distance(*corner) + corner.distance(goal);
+            cost(a).total_cmp(&cost(b))
+        })
+        .map(|corner| Vec3::new(corner.x, from.y, corner.y))
+}
+
 /// Выталкивает круг радиуса `radius` из блоков уровня и возвращает его внутрь арены.
 /// Высота не учитывается: так ходят враги, которых анимация ведёт без физики.
 pub fn push_out(position: Vec3, radius: f32) -> Vec3 {
