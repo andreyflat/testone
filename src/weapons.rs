@@ -3,9 +3,10 @@ use bevy::prelude::*;
 use bevy::solari::prelude::RaytracingMesh3d;
 use bevy_rapier3d::prelude::*;
 use dummies::DamageSystems;
-use crate::enemies::{ENEMY_GROUP, ENEMY_HEIGHT, ENEMY_RADIUS, Enemy, EnemyHits, Health, PLAYER_GROUP, RAGDOLL_GROUP};
+use crate::enemies::{ENEMY_GROUP, ENEMY_HEIGHT, ENEMY_RADIUS, Enemy, EnemyHits, Health, PLAYER_GROUP, PLAYER_MAX_ARMOR, PLAYER_MAX_HEALTH, RAGDOLL_GROUP};
 use crate::lights::raytraced;
-use crate::player::{Player, PlayerCamera, Velocity as PlayerVelocity};
+use crate::player::{Player, PlayerBody, PlayerCamera, Velocity as PlayerVelocity};
+use crate::ui::Notices;
 
 /// Ствол на высоте плеча, над центром игрока (около 1.4 м над полом). Выстрел без врага
 /// под прицелом идёт горизонтально на этой высоте: с пола в грудь врагу и поверх ящиков.
@@ -65,6 +66,7 @@ impl Plugin for WeaponsPlugin {
             .add_systems(Update, (
                 (select_weapon, aim_player, handle_shooting, fly_projectiles).chain().before(DamageSystems),
                 fade_effects,
+                collect_pickups,
             ));
     }
 }
@@ -101,6 +103,180 @@ impl Default for Weapon {
             kind: WeaponKind::MachineGun,
             cooldown: 0.0,
         }
+    }
+}
+
+/// Патроны игрока. Перчатке они не нужны.
+#[derive(Component, Clone, Copy)]
+pub struct Ammo {
+    pub bullets: u32,
+    pub rails: u32,
+    pub rockets: u32,
+}
+
+/// С таким запасом игрок начинает забег: по одной коробке каждого вида.
+impl Default for Ammo {
+    fn default() -> Self {
+        Self {
+            bullets: AMMO_BOX_BULLETS,
+            rails: AMMO_BOX_RAILS,
+            rockets: AMMO_BOX_ROCKETS,
+        }
+    }
+}
+
+impl Ammo {
+    /// Сколько осталось выстрелов из этого оружия. У перчатки они не кончаются.
+    pub fn left(&self, kind: WeaponKind) -> Option<u32> {
+        match kind {
+            WeaponKind::Gauntlet => None,
+            WeaponKind::MachineGun => Some(self.bullets),
+            WeaponKind::Railgun => Some(self.rails),
+            WeaponKind::RocketLauncher => Some(self.rockets),
+        }
+    }
+
+    /// Тратит один выстрел. Возвращает `false`, если стрелять нечем.
+    fn spend(&mut self, kind: WeaponKind) -> bool {
+        let left = match kind {
+            WeaponKind::Gauntlet => return true,
+            WeaponKind::MachineGun => &mut self.bullets,
+            WeaponKind::Railgun => &mut self.rails,
+            WeaponKind::RocketLauncher => &mut self.rockets,
+        };
+        if *left == 0 {
+            return false;
+        }
+        *left -= 1;
+        true
+    }
+}
+
+/// Сколько патронов в одной коробке каждого вида.
+const AMMO_BOX_BULLETS: u32 = 20;
+const AMMO_BOX_RAILS: u32 = 10;
+const AMMO_BOX_ROCKETS: u32 = 10;
+/// Коробка - куб с такой стороной. Парит на такой высоте над полом, плавно поднимаясь и
+/// опускаясь на столько метров с такой частотой, рад/с, и вращается с такой скоростью, рад/с.
+const AMMO_BOX_SIZE: f32 = 0.3;
+const AMMO_BOX_HEIGHT: f32 = 0.5;
+const AMMO_BOX_BOB: f32 = 0.12;
+const AMMO_BOX_BOB_RATE: f32 = 2.5;
+const AMMO_BOX_SPIN: f32 = 1.5;
+/// Сколько здоровья и брони даёт коробка.
+const PICKUP_HEALTH: f32 = 10.0;
+const PICKUP_ARMOR: f32 = 10.0;
+const HEALTH_ORB_RADIUS: f32 = 0.18;
+/// Игрок подбирает коробку, подойдя к ней на такое расстояние по полу.
+const AMMO_PICKUP_REACH: f32 = 0.9;
+
+/// Что лежит в коробке.
+#[derive(Clone, Copy, Debug)]
+pub enum PickupKind {
+    Ammo(WeaponKind),
+    Health,
+    Armor,
+}
+
+/// Коробка с патронами, здоровьем или бронёй. Выпадает из убитого врага и лежит, пока игрок
+/// не подберёт.
+#[derive(Component)]
+pub struct Pickup(PickupKind);
+
+/// Кладёт коробку с патронами случайного вида на пол возле точки `position`.
+pub fn spawn_ammo_pickup(commands: &mut Commands, assets: &WeaponAssets, position: Vec3) {
+    let kind = match fastrand::u32(0..3) {
+        0 => WeaponKind::MachineGun,
+        1 => WeaponKind::Railgun,
+        _ => WeaponKind::RocketLauncher,
+    };
+    spawn_pickup(commands, assets, PickupKind::Ammo(kind), position);
+}
+
+/// Кладёт коробку на пол возле точки `position`: немного в стороне, чтобы несколько коробок
+/// из одного врага не слились в одну.
+pub fn spawn_pickup(commands: &mut Commands, assets: &WeaponAssets, kind: PickupKind, position: Vec3) {
+    let material = match kind {
+        PickupKind::Ammo(WeaponKind::MachineGun) => &assets.pickup_materials[0],
+        PickupKind::Ammo(WeaponKind::Railgun) => &assets.pickup_materials[1],
+        PickupKind::Ammo(_) => &assets.pickup_materials[2],
+        PickupKind::Health => &assets.pickup_materials[3],
+        PickupKind::Armor => &assets.pickup_materials[4],
+    };
+    // Здоровье - шар, всё остальное - кубики
+    let (mesh, scale) = match kind {
+        PickupKind::Health => (&assets.sphere_mesh, HEALTH_ORB_RADIUS),
+        _ => (&assets.ammo_mesh, 1.0),
+    };
+    let scatter = Vec3::new(fastrand::f32() - 0.5, 0.0, fastrand::f32() - 0.5) * 0.8;
+    commands.spawn((
+        Mesh3d(mesh.clone()),
+        RaytracingMesh3d(mesh.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::from_translation((position + scatter).with_y(AMMO_BOX_HEIGHT)).with_scale(Vec3::splat(scale)),
+        Pickup(kind),
+        Name::new("Pickup"),
+    ));
+}
+
+/// Вращает коробки и отдаёт игроку те, к которым он подошёл. Здоровье и броня не подбираются,
+/// пока они полные: коробка остаётся лежать.
+fn collect_pickups(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut player: Query<(&Transform, &mut Ammo, &mut Health), With<Player>>,
+    mut pickups: Query<(Entity, &mut Transform, &Pickup), Without<Player>>,
+    mut notices: ResMut<Notices>,
+) {
+    let Ok((player, mut ammo, mut health)) = player.single_mut() else {
+        return;
+    };
+    for (entity, mut transform, pickup) in pickups.iter_mut() {
+        transform.rotate_y(AMMO_BOX_SPIN * time.delta_secs());
+        // Каждая коробка качается в своей фазе, по месту, где лежит
+        let phase = transform.translation.x * 1.7 + transform.translation.z * 2.3;
+        transform.translation.y = AMMO_BOX_HEIGHT + AMMO_BOX_BOB * (time.elapsed_secs() * AMMO_BOX_BOB_RATE + phase).sin();
+        let offset = player.translation - transform.translation;
+        // В прыжке над коробкой она не подбирается
+        if offset.with_y(0.0).length() > AMMO_PICKUP_REACH || offset.y > 1.5 {
+            continue;
+        }
+        match pickup.0 {
+            PickupKind::Ammo(kind) => {
+                let (left, amount) = match kind {
+                    WeaponKind::MachineGun => (&mut ammo.bullets, AMMO_BOX_BULLETS),
+                    WeaponKind::Railgun => (&mut ammo.rails, AMMO_BOX_RAILS),
+                    _ => (&mut ammo.rockets, AMMO_BOX_ROCKETS),
+                };
+                *left += amount;
+                info!("Патроны: +{amount} {kind:?}");
+                let name = match kind {
+                    WeaponKind::MachineGun => "MACHINE GUN",
+                    WeaponKind::Railgun => "RAILGUN",
+                    _ => "ROCKETS",
+                };
+                notices.show(format!("+{amount} {name}"));
+            }
+            PickupKind::Health => {
+                if health.current >= PLAYER_MAX_HEALTH {
+                    continue;
+                }
+                let gained = PICKUP_HEALTH.min(PLAYER_MAX_HEALTH - health.current);
+                health.current += gained;
+                info!("Подобрано здоровье, здоровье: {}", health.current);
+                notices.show(format!("+{gained:.0} HP"));
+            }
+            PickupKind::Armor => {
+                if health.armor >= PLAYER_MAX_ARMOR {
+                    continue;
+                }
+                let gained = PICKUP_ARMOR.min(PLAYER_MAX_ARMOR - health.armor);
+                health.armor += gained;
+                info!("Подобрана броня, броня: {}", health.armor);
+                notices.show(format!("+{gained:.0} ARMOR"));
+            }
+        }
+        commands.entity(entity).despawn();
     }
 }
 
@@ -144,6 +320,10 @@ pub struct WeaponAssets {
     trail_mesh: Handle<Mesh>,
     enemy_bullet_mesh: Handle<Mesh>,
     enemy_bullet_material: Handle<StandardMaterial>,
+    ammo_mesh: Handle<Mesh>,
+    /// Вид коробки говорит, что в ней: пули жёлтые, заряды рейлгана голубые, ракеты оранжевые,
+    /// броня - красный кубик, здоровье - гладкий зеленоватый шар.
+    pickup_materials: [Handle<StandardMaterial>; 5],
 }
 
 /// Пуля врага: красная, меньше и медленнее пули игрока, от неё можно уйти.
@@ -220,6 +400,16 @@ fn setup_weapon_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Шар здоровья гладкий, как стекло: в нём отражаются лампы и фонарь. Прозрачности у него
+    // нет: трассировка Solari её не рисует. Слабое свечение - чтобы его было видно в темноте
+    let health_orb = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.75, 1.0, 0.8),
+        perceptual_roughness: 0.05,
+        metallic: 0.0,
+        reflectance: 0.8,
+        emissive: LinearRgba::rgb(0.2, 1.0, 0.3) * 600.0,
+        ..default()
+    });
     let mut glowing = |emissive: LinearRgba| materials.add(StandardMaterial {
         base_color: Color::BLACK,
         emissive,
@@ -235,6 +425,15 @@ fn setup_weapon_assets(
         trail_mesh: meshes.add(raytraced(Cylinder::new(RAIL_TRAIL_RADIUS, 1.0))),
         enemy_bullet_mesh: meshes.add(raytraced(Sphere::new(ENEMY_BULLET_RADIUS).mesh().ico(0).unwrap())),
         enemy_bullet_material: glowing(LinearRgba::rgb(1.0, 0.1, 0.05) * 20_000.0),
+        ammo_mesh: meshes.add(raytraced(Cuboid::from_length(AMMO_BOX_SIZE))),
+        // Светятся слабо: чтобы их было видно в темноте, но арену они не освещали
+        pickup_materials: [
+            glowing(LinearRgba::rgb(1.0, 0.8, 0.2) * 1_500.0),
+            glowing(LinearRgba::rgb(0.3, 0.8, 1.0) * 1_500.0),
+            glowing(LinearRgba::rgb(1.0, 0.35, 0.05) * 1_500.0),
+            health_orb,
+            glowing(LinearRgba::rgb(1.0, 0.05, 0.05) * 1_500.0),
+        ],
     });
 }
 
@@ -328,17 +527,24 @@ fn handle_shooting(
     aim: Res<AimPoint>,
     assets: Res<WeaponAssets>,
     rapier: ReadRapierContext,
-    mut player_query: Query<(&Transform, &mut Weapon), With<Player>>,
+    mut player_query: Query<(&Transform, &mut Weapon, &mut Ammo), With<Player>>,
     enemies: Query<(Entity, &Enemy)>,
+    mut body: Query<&mut dummies::Animation, With<PlayerBody>>,
     mut hits: EnemyHits,
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let Ok((player_transform, mut weapon)) = player_query.single_mut() else {
+    let Ok((player_transform, mut weapon, mut ammo)) = player_query.single_mut() else {
         return;
     };
     weapon.cooldown = (weapon.cooldown - time.delta_secs()).max(0.0);
     if !mouse_input.pressed(MouseButton::Left) || weapon.cooldown > 0.0 {
+        return;
+    }
+    if !ammo.spend(weapon.kind) {
+        // Патроны кончились: в руках остаётся перчатка, как в Quake
+        info!("Патроны кончились: {:?}. Оружие: Gauntlet", weapon.kind);
+        weapon.kind = WeaponKind::Gauntlet;
         return;
     }
     weapon.cooldown = weapon.kind.cooldown();
@@ -354,6 +560,10 @@ fn handle_shooting(
 
     match weapon.kind {
         WeaponKind::Gauntlet => {
+            // Тело игрока бьёт рукой при каждом взмахе, попал он или нет
+            if let Ok(mut body) = body.single_mut() {
+                body.punch();
+            }
             let fist = player_transform.translation + Vec3::Y * PUNCH_OFFSET_Y;
             punch(&mut commands, &assets, &mut materials, &enemies, &mut hits, fist, forward);
         }
@@ -539,7 +749,7 @@ fn punch(
         let Some((part, place)) = hits.nearest_part(entity, fist) else {
             return;
         };
-        hits.hit(entity, part, place, forward, GAUNTLET_DAMAGE, 1.0, Some(muzzle.y));
+        hits.punch_hit(entity, part, place, forward, GAUNTLET_DAMAGE, Some(muzzle.y));
         spawn_flash(commands, assets, materials, Flash::punch(fist));
     }
 }
@@ -654,6 +864,6 @@ pub fn equip_player_weapon(
     player_query: Query<Entity, (With<Player>, Without<Weapon>)>,
 ) {
     for player_entity in player_query.iter() {
-        commands.entity(player_entity).insert(Weapon::default());
+        commands.entity(player_entity).insert((Weapon::default(), Ammo::default()));
     }
 }

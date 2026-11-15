@@ -47,6 +47,15 @@ const AIR_RATE: f32 = 9.0;
 const JUMP_THIGHS: [f32; 2] = [-1.0, -0.35];
 const JUMP_KNEES: [f32; 2] = [1.3, 0.8];
 const JUMP_FEET: [f32; 2] = [0.2, 0.3];
+/// A punch with its right arm takes this long, in seconds: it draws its fist back to its
+/// shoulder, throws it straight out ahead, holds it there a moment and lets it drop. The fist
+/// lands `PUNCH_LANDS` seconds in.
+const PUNCH_TIME: f32 = 0.34;
+pub const PUNCH_LANDS: f32 = 0.12;
+/// The punching arm's shoulder and elbow, in radians about the sideways axis, drawn back and
+/// thrown out.
+const PUNCH_DRAWN: (f32, f32) = (0.5, -2.0);
+const PUNCH_THROWN: (f32, f32) = (-1.45, -0.1);
 /// Armed, it holds the gun's grip this far in front of its chest, and this far below its
 /// shoulders, when not aiming, tipped down this far, in radians...
 const LOW_READY_GRIP: Vec3 = Vec3::new(0.06, -0.32, 0.32);
@@ -157,6 +166,8 @@ pub struct Animation {
     lean: f32,
     /// How far into its jump pose it is, from 0 to 1.
     air: f32,
+    /// How much longer the punch it is throwing lasts, in seconds.
+    punching: f32,
     /// How much longer it is signalling by hand for, in seconds.
     signalling: f32,
     /// Where it held the gun last step, in the dummy's space.
@@ -220,6 +231,7 @@ impl Animation {
             aim_pitch: 0.0,
             lean: 0.0,
             air: 0.0,
+            punching: 0.0,
             signalling: 0.0,
             gun: Transform::IDENTITY,
         }
@@ -255,6 +267,12 @@ impl Animation {
 
     pub fn stride(&self) -> f32 {
         self.stride
+    }
+
+    /// Throws a punch with its right arm, whatever else its arms are doing: the fist lands
+    /// `PUNCH_LANDS` seconds from now.
+    pub fn punch(&mut self) {
+        self.punching = PUNCH_TIME;
     }
 
     /// Signals to others by hand: pointing out ahead with its off hand for a moment.
@@ -314,6 +332,9 @@ impl Animation {
                 }
                 if self.armed {
                     self.hold_gun(&mut local);
+                }
+                if self.punching > 0.0 {
+                    self.throw_punch(&mut local);
                 }
                 local.map(|local| frame * local)
             }
@@ -409,6 +430,28 @@ impl Animation {
                 Transform::from_translation(shoulder + upper_turn * (upper.center() - shoulder_rest)).with_rotation(upper_turn);
             local[lower.index()] =
                 Transform::from_translation(elbow + lower_turn * (lower.center() - elbow_rest)).with_rotation(lower_turn);
+        }
+    }
+
+    /// Poses its right arm, in its body's own space, as far through its punch as it is.
+    fn throw_punch(&self, local: &mut [Transform; PART_COUNT]) {
+        let t = 1.0 - self.punching / PUNCH_TIME;
+        // Easing out of whatever the arm was doing, and back into it at the end.
+        let weight = smoothstep(t / 0.15) * smoothstep((1.0 - t) / 0.3);
+        // Drawn back to begin with, thrown out by the time the fist lands.
+        let landed = PUNCH_LANDS / PUNCH_TIME;
+        let reach = smoothstep((t - landed * 0.45) / (landed * 0.55));
+        let shoulder = PUNCH_DRAWN.0.lerp(PUNCH_THROWN.0, reach);
+        let elbow = PUNCH_DRAWN.1.lerp(PUNCH_THROWN.1, reach);
+        for part in [Part::RightUpperArm, Part::RightForearm] {
+            let thrown = chain_pose(part, |part| match part {
+                Part::RightUpperArm => shoulder,
+                Part::RightForearm => elbow,
+                _ => 0.0,
+            });
+            let pose = &mut local[part.index()];
+            pose.translation = pose.translation.lerp(thrown.translation, weight);
+            pose.rotation = pose.rotation.slerp(thrown.rotation, weight);
         }
     }
 
@@ -595,6 +638,7 @@ impl Animation {
         if !self.steer.carried {
             self.root.translation += forward * self.pace * dt;
         }
+        self.punching = (self.punching - dt).max(0.0);
         let air = if self.steer.airborne { 1.0 } else { 0.0 };
         self.air += (air - self.air).clamp(-AIR_RATE * dt, AIR_RATE * dt);
         self.walked += self.pace * dt;

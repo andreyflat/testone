@@ -34,7 +34,7 @@ mod struggle;
 
 pub use spawn::spawn_dummy;
 
-pub use animation::{Animation, GUN_GRIP, RUN_SPEED, Steer, wrap_angle};
+pub use animation::{Animation, GUN_GRIP, PUNCH_LANDS, RUN_SPEED, Steer, wrap_angle};
 
 use std::f32::consts::PI;
 

@@ -11,7 +11,7 @@ use biped::body::Part;
 use dummies::{AnimateSystems, Animation, DamageSystems, DummiesPlugin, DummyAssets, Protection, Ragdoll, Steer, Struggle, spawn_dummy};
 use bevy::solari::prelude::RaytracingMesh3d;
 use crate::lights::raytraced;
-use crate::weapons::{ENEMY_BULLET_SPEED, WeaponAssets, spawn_enemy_bullet};
+use crate::weapons::{Ammo, ENEMY_BULLET_SPEED, Pickup, PickupKind, WeaponAssets, spawn_ammo_pickup, spawn_enemy_bullet, spawn_pickup};
 use game_core::combat::{self, BodyPart, BodyPartKind, Damage};
 use crate::player::Player;
 use crate::world::{ARENA_HALF_SIZE, detour, is_blocked, push_out};
@@ -19,6 +19,9 @@ use crate::world::{ARENA_HALF_SIZE, detour, is_blocked, push_out};
 pub use game_core::collision::{ENEMY_GROUP, PLAYER_GROUP, RAGDOLL_GROUP};
 
 pub const PLAYER_MAX_HEALTH: f32 = 100.0;
+pub const PLAYER_MAX_ARMOR: f32 = 100.0;
+/// Такую долю урона принимает броня игрока.
+const ARMOR_ABSORB: f32 = 2.0 / 3.0;
 
 /// Радиус, которым враг упирается в стены, других врагов и достаёт игрока.
 pub const ENEMY_RADIUS: f32 = 0.35;
@@ -90,6 +93,12 @@ const CORPSE_STILL_TIME: f32 = 1.5;
 const CORPSE_STILL_SPEED: f32 = 0.15;
 const CORPSE_STILL_SPIN: f32 = 1.0;
 
+/// С какой вероятностью из врага, убитого не перчаткой, выпадают патроны, и из любого
+/// убитого - здоровье и броня. Убитый перчаткой роняет патроны всегда.
+const AMMO_DROP_CHANCE: f32 = 0.15;
+const HEALTH_DROP_CHANCE: f32 = 0.05;
+const ARMOR_DROP_CHANCE: f32 = 0.05;
+
 /// Взрыв отбрасывает части тела с такой скоростью вплотную к центру, м/с.
 const BLAST_SPEED: f32 = 14.0;
 
@@ -98,6 +107,7 @@ impl Plugin for EnemiesPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(DummiesPlugin)
             .init_resource::<WaveState>()
+            .init_resource::<Frags>()
             .add_systems(Startup, setup_gun_assets)
             .add_systems(Update, (
                 wave_system,
@@ -110,6 +120,10 @@ impl Plugin for EnemiesPlugin {
             .add_systems(Update, (bury_dead, freeze_corpses).chain().after(DamageSystems));
     }
 }
+
+/// Сколько врагов игрок убил за текущий забег.
+#[derive(Resource, Default)]
+pub struct Frags(pub u32);
 
 #[derive(Resource)]
 pub struct WaveState {
@@ -141,6 +155,8 @@ pub struct Enemy {
     pub standing: bool,
     /// На какой угол его путь к игроку отклонён от прямой: так враги заходят с разных сторон.
     pub flank: f32,
+    /// Замахнулся: через столько секунд его кулак долетит до игрока.
+    pub strike_in: Option<f32>,
 }
 
 /// Враг с автоматом: держит дистанцию и стреляет очередями, пока видит игрока.
@@ -180,6 +196,10 @@ fn setup_gun_assets(
     });
 }
 
+/// Последним врага ударила перчатка. Убитый таким ударом роняет патроны.
+#[derive(Component)]
+pub struct Punched;
+
 /// Броня бронированного врага. Пока она цела, тело неуязвимо.
 #[derive(Component)]
 pub struct ArmorPlating {
@@ -203,17 +223,23 @@ pub struct Corpse {
 #[derive(Component)]
 pub struct Health {
     pub current: f32,
+    /// Броня игрока: принимает на себя часть каждого удара, пока не кончится.
+    pub armor: f32,
 }
 
 impl Health {
     pub fn new(max_health: f32) -> Self {
         Self {
             current: max_health,
+            armor: PLAYER_MAX_ARMOR,
         }
     }
 
+    /// Как в Quake 3: две трети урона уходят в броню, пока она есть, остальное в здоровье.
     pub fn take_damage(&mut self, damage: f32) {
-        self.current = (self.current - damage).max(0.0);
+        let absorbed = (damage * ARMOR_ABSORB).min(self.armor);
+        self.armor -= absorbed;
+        self.current = (self.current - (damage - absorbed)).max(0.0);
     }
 
     pub fn is_dead(&self) -> bool {
@@ -275,6 +301,8 @@ impl EnemyHits<'_, '_> {
         impact: f32,
         hit_y: Option<f32>,
     ) {
+        // Любое попадание, кроме удара перчаткой, снимает её отметку (см. `punch_hit`)
+        self.commands.entity(body).try_remove::<Punched>();
         let (amount, impact, blunt) = match self.platings.get_mut(body) {
             Ok(mut plating) => {
                 if hit_y.is_none_or(|y| y >= ARMOR_MIN_Y) {
@@ -304,6 +332,12 @@ impl EnemyHits<'_, '_> {
             through: false,
             bleed: false,
         });
+    }
+
+    /// Удар перчаткой: то же попадание в полную силу, но убитый им враг роняет патроны.
+    pub fn punch_hit(&mut self, body: Entity, part: Entity, point: Vec3, direction: Vec3, amount: f32, hit_y: Option<f32>) {
+        self.hit(body, part, point, direction, amount, 1.0, hit_y);
+        self.commands.entity(body).try_insert(Punched);
     }
 
     /// Взрыв в точке `origin`: урон каждому, кого достаёт, живому или уже упавшему,
@@ -404,6 +438,7 @@ fn wave_system(
         let mut enemy = commands.entity(spawned.dummy);
         enemy.insert(Enemy {
             flank: (fastrand::f32() * 2.0 - 1.0) * FLANK_ANGLE,
+            strike_in: None,
             speed,
             attack_cooldown: 0.0,
             stuck_timer: STUCK_CHECK_INTERVAL,
@@ -668,19 +703,24 @@ fn gunners_fire(
     }
 }
 
-/// Урон считается по пересечению объёмов, а не по физике. Бьёт только враг, стоящий на ногах.
+/// Удар врага. Достав игрока, враг замахивается и бьёт рукой; урон проходит в момент, когда
+/// кулак долетает, и только если игрок всё ещё рядом: от удара можно успеть отскочить.
+/// Касание считается по пересечению объёмов, а не по физике. Бьёт только враг, стоящий на ногах.
 fn enemy_contact_damage(
     time: Res<Time>,
     mut player: Query<(&Transform, &mut Health), With<Player>>,
-    mut enemies: Query<&mut Enemy>,
+    mut enemies: Query<(&mut Enemy, &mut Animation)>,
 ) {
     let Ok((player_transform, mut health)) = player.single_mut() else {
         return;
     };
+    let dt = time.delta_secs();
 
-    for mut enemy in enemies.iter_mut() {
-        enemy.attack_cooldown = (enemy.attack_cooldown - time.delta_secs()).max(0.0);
+    for (mut enemy, mut animation) in enemies.iter_mut() {
+        enemy.attack_cooldown = (enemy.attack_cooldown - dt).max(0.0);
         if !enemy.standing {
+            // Сбитый с ног удар не доводит
+            enemy.strike_in = None;
             continue;
         }
 
@@ -688,10 +728,21 @@ fn enemy_contact_damage(
         let touching = Vec2::new(offset.x, offset.z).length() < ENEMY_RADIUS + PLAYER_RADIUS
             && player_transform.translation.y - PLAYER_HALF_HEIGHT < ENEMY_HEIGHT;
 
-        if touching && enemy.attack_cooldown <= 0.0 {
+        if let Some(left) = enemy.strike_in {
+            let left = left - dt;
+            if left > 0.0 {
+                enemy.strike_in = Some(left);
+                continue;
+            }
+            enemy.strike_in = None;
+            if touching {
+                health.take_damage(CONTACT_DAMAGE);
+                info!("Игрок получил урон, здоровье: {}", health.current);
+            }
+        } else if touching && enemy.attack_cooldown <= 0.0 {
             enemy.attack_cooldown = CONTACT_COOLDOWN;
-            health.take_damage(CONTACT_DAMAGE);
-            info!("Игрок получил урон, здоровье: {}", health.current);
+            enemy.strike_in = Some(dummies::PUNCH_LANDS);
+            animation.punch();
         }
     }
 }
@@ -699,17 +750,31 @@ fn enemy_contact_damage(
 /// Убитый враг перестаёт быть врагом: волна его больше не ждёт, а тело доживает как рэгдолл.
 fn bury_dead(
     mut commands: Commands,
-    enemies: Query<(Entity, &Ragdoll, Option<&Gunner>), With<Enemy>>,
+    enemies: Query<(Entity, &Enemy, &Ragdoll, Option<&Gunner>, Has<Punched>)>,
+    assets: Res<WeaponAssets>,
+    mut frags: ResMut<Frags>,
 ) {
-    for (entity, ragdoll, gunner) in enemies.iter() {
+    for (entity, enemy, ragdoll, gunner, punched) in enemies.iter() {
         if ragdoll.dead() {
+            frags.0 += 1;
+            // Убитый перчаткой роняет патроны всегда, убитый иначе - изредка.
+            // Здоровье и броня выпадают редко и независимо от патронов
+            if punched || fastrand::f32() < AMMO_DROP_CHANCE {
+                spawn_ammo_pickup(&mut commands, &assets, enemy.position);
+            }
+            if fastrand::f32() < HEALTH_DROP_CHANCE {
+                spawn_pickup(&mut commands, &assets, PickupKind::Health, enemy.position);
+            }
+            if fastrand::f32() < ARMOR_DROP_CHANCE {
+                spawn_pickup(&mut commands, &assets, PickupKind::Armor, enemy.position);
+            }
             // Автомат убитого исчезает
             if let Some(gunner) = gunner {
                 commands.entity(gunner.gun).try_despawn();
             }
             commands
                 .entity(entity)
-                .remove::<(Enemy, ArmorPlating, Gunner)>()
+                .remove::<(Enemy, ArmorPlating, Gunner, Punched)>()
                 .insert(Corpse { stale: false, still_for: 0.0, frozen: false });
         }
     }
@@ -760,23 +825,29 @@ fn freeze_corpses(
 /// Смерть запускает забег заново с первой волны.
 fn player_death_system(
     mut commands: Commands,
-    mut player: Query<(&mut Transform, &mut crate::player::Velocity, &mut Health), With<Player>>,
-    bodies: Query<Entity, Or<(With<Enemy>, With<Corpse>)>>,
+    mut player: Query<(&mut Transform, &mut crate::player::Velocity, &mut Health, Option<&mut Ammo>), With<Player>>,
+    bodies: Query<Entity, Or<(With<Enemy>, With<Corpse>, With<Pickup>)>>,
     mut wave_state: ResMut<WaveState>,
+    mut frags: ResMut<Frags>,
 ) {
-    let Ok((mut transform, mut velocity, mut health)) = player.single_mut() else {
+    let Ok((mut transform, mut velocity, mut health, ammo)) = player.single_mut() else {
         return;
     };
     if !health.is_dead() {
         return;
     }
 
-    info!("Игрок погиб на волне {}. Новый забег", wave_state.wave);
+    info!("Игрок погиб на волне {}, фрагов: {}. Новый забег", wave_state.wave, frags.0);
+    frags.0 = 0;
     for entity in bodies.iter() {
         commands.entity(entity).try_despawn();
     }
     transform.translation = Vec3::new(0.0, 3.0, 0.0);
     velocity.0 = Vec3::ZERO;
     health.current = PLAYER_MAX_HEALTH;
+    health.armor = PLAYER_MAX_ARMOR;
+    if let Some(mut ammo) = ammo {
+        *ammo = Ammo::default();
+    }
     *wave_state = WaveState::default();
 }

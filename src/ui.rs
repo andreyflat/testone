@@ -1,168 +1,181 @@
-// src/ui.rs - UI без crosshair (так как теперь есть курсор на земле)
+// src/ui.rs - Надписи поверх игры: кадры в секунду, фраги, оружие, здоровье и броня игрока
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use bevy_rapier3d::prelude::CollisionEvent;
+
+use crate::enemies::{Frags, Health};
 use crate::player::Player;
-use crate::enemies::{Enemy, Health};
+use crate::weapons::{Ammo, Weapon, WeaponKind};
 
-pub struct UIPlugin;
-impl Plugin for UIPlugin {
+const MARGIN: f32 = 16.0;
+const TEXT_COLOR: Color = Color::srgb(0.95, 1.0, 0.95);
+const HEALTH_COLOR: Color = Color::srgb(1.0, 0.45, 0.4);
+const ARMOR_COLOR: Color = Color::srgb(0.5, 0.75, 1.0);
+const NOTICE_COLOR: Color = Color::srgb(1.0, 0.95, 0.6);
+/// Тень под буквами, чтобы надписи читались на светлом пятне фонаря.
+const SHADOW_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 0.8);
+const SMALL: f32 = 18.0;
+const LARGE: f32 = 30.0;
+
+pub struct UiPlugin;
+impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_ui, setup_player_health))
-           .add_systems(Update, (
-               update_health_bar,
-               update_enemy_counter,
-               player_enemy_collision,
-           ));
+        app.init_resource::<Notices>()
+            .add_systems(Startup, spawn_hud)
+            .add_systems(Update, update_hud);
     }
 }
 
-#[derrive(Component)]
-struct HealthBar;
+/// Сколько секунд уведомление висит на экране и сколько их видно одновременно.
+const NOTICE_TIME: f32 = 2.5;
+const NOTICE_COUNT: usize = 4;
 
-#[derive(Component)]
-struct EnemyCounter;
+/// Уведомления о подобранном: что именно и сколько. Новые снизу, старые гаснут.
+#[derive(Resource, Default)]
+pub struct Notices(Vec<(String, f32)>);
 
-fn setup_ui(mut commands: Commands) {
-    // UI Root
-    commands
-        .spawn(NodeBundle {
-            style: Style {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                position_type: PositionType::Absolute,
-                ..default()
-            },
-            ..default()
-        })
-        .with_children(|parent| {
-            // Health Bar Background
-            parent
-                .spawn(NodeBundle {
-                    style: Style {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(20.0),
-                        top: Val::Px(20.0),
-                        width: Val::Px(200.0),
-                        height: Val::Px(20.0),
-                        ..default()
-                    },
-                    background_color: BackgroundColor(Color::srgb(0.2, 0.2, 0.2)),
-                    ..default()
-                })
-                .with_children(|parent| {
-                    // Health Bar Fill
-                    parent.spawn((
-                        NodeBundle {
-                            style: Style {
-                                width: Val::Percent(100.0),
-                                height: Val::Percent(100.0),
-                                ..default()
-                            },
-                            background_color: BackgroundColor(Color::srgb(0.8, 0.2, 0.2)),
-                            ..default()
-                        },
-                        HealthBar,
-                    ));
-                });
-            
-            // Enemy Counter
-            parent.spawn((
-                TextBundle::from_section(
-                    "Enemies: 0",
-                    TextStyle {
-                        font_size: 24.0,
-                        color: Color::WHITE,
-                        ..default()
-                    },
-                ).with_style(Style {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(20.0),
-                    top: Val::Px(50.0),
-                    ..default()
-                }),
-                EnemyCounter,
-            ));
-            
-            // Инструкции управления
-            parent.spawn(
-                TextBundle::from_section(
-                    "WASD - движение, Space - прыжок, ЛКМ - стрельба",
-                    TextStyle {
-                        font_size: 16.0,
-                        color: Color::srgba(1.0, 1.0, 1.0, 0.7),
-                        ..default()
-                    },
-                ).with_style(Style {
-                    position_type: PositionType::Absolute,
-                    right: Val::Px(20.0),
-                    bottom: Val::Px(20.0),
-                    ..default()
-                }),
-            );
-        });
-}
-
-fn setup_player_health(
-    mut commands: Commands,
-    player_query: Query<Entity, (With<Player>, Without<Health>)>,
-) {
-    for player_entity in player_query.iter() {
-        commands.entity(player_entity).insert(Health::new(100.0));
-    }
-}
-
-fn update_health_bar(
-    player_query: Query<&Health, With<Player>>,
-    mut health_bar_query: Query<&mut Style, With<HealthBar>>,
-) {
-    if let Ok(health) = player_query.get_single() {
-        if let Ok(mut style) = health_bar_query.get_single_mut() {
-            let health_percentage = health.current / health.max;
-            style.width = Val::Percent(health_percentage * 100.0);
+impl Notices {
+    pub fn show(&mut self, text: String) {
+        self.0.push((text, NOTICE_TIME));
+        if self.0.len() > NOTICE_COUNT {
+            self.0.remove(0);
         }
     }
 }
 
-fn update_enemy_counter(
-    enemy_query: Query<&Enemy>,
-    mut counter_query: Query<&mut Text, With<EnemyCounter>>,
-) {
-    let enemy_count = enemy_query.iter().count();
-    
-    if let Ok(mut text) = counter_query.get_single_mut() {
-        text.sections[0].value = format!("Enemies: {}", enemy_count);
-    }
+/// Какую величину показывает надпись.
+#[derive(Component, Clone, Copy)]
+enum Readout {
+    Fps,
+    Weapon,
+    Health,
+    Armor,
+    Frags,
+    Ammo,
+    Notices,
 }
 
-fn player_enemy_collision(
-    mut collision_events: EventReader<CollisionEvent>,
-    player_query: Query<Entity, With<Player>>,
-    mut player_health_query: Query<&mut Health, With<Player>>,
-    enemy_query: Query<Entity, With<Enemy>>,
-) {
-    let Ok(player_entity) = player_query.get_single() else {
-        return;
+fn spawn_hud(mut commands: Commands) {
+    let label = |readout: Readout, size: f32, color: Color| {
+        (
+            Text::new(""),
+            TextFont { font_size: size.into(), ..default() },
+            TextColor(color),
+            TextShadow { offset: Vec2::splat(2.0), color: SHADOW_COLOR },
+            readout,
+        )
     };
-    
-    for collision_event in collision_events.read() {
-        if let CollisionEvent::Stopped(entity1, entity2, _) = collision_event {
-            let enemy_entity = if *entity1 == player_entity && enemy_query.contains(*entity2) {
-                Some(*entity2)
-            } else if *entity2 == player_entity && enemy_query.contains(*entity1) {
-                Some(*entity1)
-            } else {
-                None
-            };
-            
-            if enemy_entity.is_some() {
-                if let Ok(mut health) = player_health_query.get_single_mut() {
-                    health.take_damage(10.0);
-                    
-                    if health.is_dead() {
-                        println!("Game Over! Используй стрейф-джампинг для уклонения!");
-                    }
+    // Слева вверху - кадры в секунду
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(MARGIN),
+            top: Val::Px(MARGIN),
+            ..default()
+        },
+        label(Readout::Fps, SMALL, TEXT_COLOR),
+    ));
+    // Справа вверху - убитые за забег
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(MARGIN),
+            top: Val::Px(MARGIN),
+            ..default()
+        },
+        label(Readout::Frags, LARGE, TEXT_COLOR),
+    ));
+    // По центру внизу - уведомления о подобранном
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            bottom: Val::Percent(18.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((label(Readout::Notices, LARGE, NOTICE_COLOR), TextLayout::justify(Justify::Center)));
+        });
+    // Слева внизу - здоровье и броня
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(MARGIN),
+            bottom: Val::Px(MARGIN),
+            flex_direction: FlexDirection::Column,
+            ..default()
+        })
+        .with_children(|column| {
+            column.spawn(label(Readout::Armor, LARGE, ARMOR_COLOR));
+            column.spawn(label(Readout::Health, LARGE, HEALTH_COLOR));
+        });
+    // Справа внизу - запас патронов и выбранное оружие с его патронами
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(MARGIN),
+            bottom: Val::Px(MARGIN),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexEnd,
+            ..default()
+        })
+        .with_children(|column| {
+            column.spawn(label(Readout::Ammo, SMALL, TEXT_COLOR));
+            column.spawn(label(Readout::Weapon, LARGE, TEXT_COLOR));
+        });
+}
+
+fn update_hud(
+    diagnostics: Res<DiagnosticsStore>,
+    frags: Res<Frags>,
+    time: Res<Time>,
+    mut notices: ResMut<Notices>,
+    player: Query<(&Health, Option<&Weapon>, Option<&Ammo>), With<Player>>,
+    mut labels: Query<(&Readout, &mut Text)>,
+) {
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|fps| fps.smoothed());
+    let player = player.single().ok();
+    if !notices.0.is_empty() {
+        let dt = time.delta_secs();
+        notices.0.retain_mut(|(_, left)| {
+            *left -= dt;
+            *left > 0.0
+        });
+    }
+    for (readout, mut text) in labels.iter_mut() {
+        let shown = match readout {
+            Readout::Fps => fps.map(|fps| format!("FPS {fps:.0}")),
+            Readout::Weapon => player.and_then(|(_, weapon, ammo)| weapon.zip(ammo)).map(|(weapon, ammo)| {
+                let name = match weapon.kind {
+                    WeaponKind::Gauntlet => "GAUNTLET",
+                    WeaponKind::MachineGun => "MACHINE GUN",
+                    WeaponKind::Railgun => "RAILGUN",
+                    WeaponKind::RocketLauncher => "ROCKET LAUNCHER",
+                };
+                // У перчатки патронов нет
+                match ammo.left(weapon.kind) {
+                    Some(left) => format!("{name} {left}"),
+                    None => name.to_string(),
                 }
+            }),
+            Readout::Ammo => player.and_then(|(_, _, ammo)| ammo).map(|ammo| {
+                format!("MG {}   RAIL {}   ROCKET {}", ammo.bullets, ammo.rails, ammo.rockets)
+            }),
+            Readout::Health => player.map(|(health, ..)| format!("HP {:.0}", health.current.ceil())),
+            Readout::Notices => {
+                Some(notices.0.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n"))
             }
+            Readout::Frags => Some(format!("FRAGS {}", frags.0)),
+            Readout::Armor => player.map(|(health, ..)| format!("ARMOR {:.0}", health.armor.ceil())),
+        };
+        // Текст меняется только вместе со значением, иначе он перерисовывался бы каждый кадр
+        if let Some(shown) = shown
+            && text.0 != shown
+        {
+            text.0 = shown;
         }
     }
 }
