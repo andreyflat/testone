@@ -9,7 +9,7 @@ use bevy_rapier3d::prelude::*;
 use biped::Biped;
 use biped::body::Part;
 use dummies::{AnimateSystems, Animation, DamageSystems, DummiesPlugin, DummyAssets, Protection, Ragdoll, Steer, Struggle, spawn_dummy};
-use game_core::combat::{self, BodyPart, Damage};
+use game_core::combat::{self, BodyPart, BodyPartKind, Damage};
 use crate::player::Player;
 use crate::world::{ARENA_HALF_SIZE, is_blocked, push_out};
 
@@ -41,15 +41,15 @@ const CONTACT_COOLDOWN: f32 = 0.5;
 
 const WAVE_SPAWN_RADIUS: f32 = 15.0;
 const WAVE_DELAY: f32 = 2.0;
+/// Ближе этого к игроку враг не появляется, даже когда игрок стоит в углу арены.
+const MIN_SPAWN_DISTANCE: f32 = 7.0;
 
-/// Обмякшее тело лежит столько секунд, потом исчезает.
-const CORPSE_LINGER: f32 = 6.0;
-/// Больше тел одновременно не бывает: самые старые убираются раньше срока.
-/// Каждое тело - 14 связанных суставами твёрдых тел, это дорого для физики.
-const MAX_CORPSES: usize = 14;
+/// Обмякшее тело через столько секунд застывает: каждое - 14 связанных суставами
+/// твёрдых тел, считать их физику весь забег слишком дорого.
+const CORPSE_FREEZE: f32 = 4.0;
 
 /// Взрыв отбрасывает части тела с такой скоростью вплотную к центру, м/с.
-const BLAST_SPEED: f32 = 6.0;
+const BLAST_SPEED: f32 = 14.0;
 
 pub struct EnemiesPlugin;
 impl Plugin for EnemiesPlugin {
@@ -63,7 +63,7 @@ impl Plugin for EnemiesPlugin {
                 enemy_contact_damage,
                 player_death_system,
             ).chain())
-            .add_systems(Update, (bury_dead, clear_corpses).chain().after(DamageSystems));
+            .add_systems(Update, (bury_dead, freeze_corpses).chain().after(DamageSystems));
     }
 }
 
@@ -109,8 +109,8 @@ pub struct ArmorPlating {
 #[derive(Component)]
 pub struct Corpse {
     limp_for: f32,
-    /// Порядок гибели: при переполнении первыми убираются самые старые.
-    order: u32,
+    /// Тело застыло: физика его больше не считает.
+    frozen: bool,
 }
 
 /// Здоровье игрока. У врагов своё, внутри `dummies`.
@@ -140,7 +140,7 @@ impl Health {
 pub struct EnemyHits<'w, 's> {
     commands: Commands<'w, 's>,
     damage: MessageWriter<'w, Damage>,
-    body_parts: Query<'w, 's, &'static ChildOf, With<BodyPart>>,
+    body_parts: Query<'w, 's, (&'static ChildOf, &'static BodyPart)>,
     armor_pieces: Query<'w, 's, (&'static combat::Armor, &'static ChildOf)>,
     platings: Query<'w, 's, &'static mut ArmorPlating>,
     bipeds: Query<'w, 's, (Entity, &'static Biped)>,
@@ -151,11 +151,16 @@ pub struct EnemyHits<'w, 's> {
 impl EnemyHits<'_, '_> {
     /// Чьё это тело и какая его часть, если коллайдер - часть тела или пластина брони на ней.
     pub fn target(&self, collider: Entity) -> Option<(Entity, Entity)> {
-        if let Ok(parent) = self.body_parts.get(collider) {
+        if let Ok((parent, _)) = self.body_parts.get(collider) {
             return Some((parent.parent(), collider));
         }
         let (armor, parent) = self.armor_pieces.get(collider).ok()?;
         Some((armor.dummy, parent.parent()))
+    }
+
+    /// Эта часть тела - голова.
+    pub fn is_head(&self, part: Entity) -> bool {
+        self.body_parts.get(part).is_ok_and(|(_, part)| part.0 == BodyPartKind::Head)
     }
 
     /// Ближайшая к точке часть тела и где она.
@@ -306,25 +311,39 @@ fn wave_system(
     }
 }
 
-/// Точка на кольце вокруг игрока, не занятая стенами и платформами.
-/// Если угол упирается в геометрию, поворачивает дальше и сужает кольцо.
+/// Точка на кольце вокруг игрока, не занятая стенами и платформами и не ближе
+/// `MIN_SPAWN_DISTANCE` к игроку. Если угол упирается в геометрию или в край арены,
+/// поворачивает дальше по кругу и сужает кольцо.
+///
+/// У края арены точки кольца прижимаются к границе и могут оказаться прямо на игроке,
+/// поэтому расстояние проверяется отдельно.
 fn spawn_point(player: Vec3, angle: f32) -> Vec3 {
     const MARGIN: f32 = ENEMY_RADIUS * 2.0;
+    /// Полный круг с шагом 0.3 радиана.
+    const STEPS: usize = 21;
     let limit = ARENA_HALF_SIZE - MARGIN;
     let candidate = |angle: f32, radius: f32| Vec3::new(
         (player.x + angle.cos() * radius).clamp(-limit, limit),
         0.0,
         (player.z + angle.sin() * radius).clamp(-limit, limit),
     );
+    let away = |position: Vec3| position.distance(player.with_y(0.0));
+    let mut farthest = candidate(angle, WAVE_SPAWN_RADIUS);
     for radius in [WAVE_SPAWN_RADIUS, WAVE_SPAWN_RADIUS * 0.75, WAVE_SPAWN_RADIUS * 0.5] {
-        for step in 0..12 {
+        for step in 0..STEPS {
             let position = candidate(angle + step as f32 * 0.3, radius);
-            if !is_blocked(position, MARGIN) {
+            if is_blocked(position, MARGIN) {
+                continue;
+            }
+            if away(position) >= MIN_SPAWN_DISTANCE {
                 return position;
+            }
+            if away(position) > away(farthest) {
+                farthest = position;
             }
         }
     }
-    candidate(angle, WAVE_SPAWN_RADIUS)
+    farthest
 }
 
 /// Запоминает, где каждый враг стоит и на ногах ли он: по тазу, куда бы тело ни унесла физика.
@@ -461,34 +480,42 @@ fn enemy_contact_damage(
 fn bury_dead(
     mut commands: Commands,
     enemies: Query<(Entity, &Ragdoll), With<Enemy>>,
-    mut buried: Local<u32>,
 ) {
     for (entity, ragdoll) in enemies.iter() {
         if ragdoll.dead() {
-            *buried += 1;
             commands
                 .entity(entity)
                 .remove::<(Enemy, ArmorPlating)>()
-                .insert(Corpse { limp_for: 0.0, order: *buried });
+                .insert(Corpse { limp_for: 0.0, frozen: false });
         }
     }
 }
 
-/// Убирает тела: обмякшие через `CORPSE_LINGER`, а лишние сверх `MAX_CORPSES` сразу.
-fn clear_corpses(
+/// Тела остаются лежать насовсем. Обмякшее тело через `CORPSE_FREEZE` застывает: физика
+/// перестаёт его считать, а снаряды и прицел проходят сквозь него. Иначе сотни тел за забег
+/// тормозили бы игру и ловили бы пули вместо живых врагов.
+fn freeze_corpses(
     time: Res<Time>,
     mut commands: Commands,
-    mut corpses: Query<(Entity, &mut Corpse, Has<Struggle>)>,
+    mut corpses: Query<(&mut Corpse, &Biped, Has<Struggle>)>,
+    children: Query<&Children>,
 ) {
-    let excess = corpses.iter().count().saturating_sub(MAX_CORPSES) as u32;
-    let oldest = corpses.iter().map(|(_, corpse, _)| corpse.order).min().unwrap_or(0);
-    for (entity, mut corpse, struggling) in corpses.iter_mut() {
+    for (mut corpse, biped, struggling) in corpses.iter_mut() {
         // Пока тело борется, оно не лежит
-        if !struggling {
-            corpse.limp_for += time.delta_secs();
+        if corpse.frozen || struggling {
+            continue;
         }
-        if corpse.limp_for > CORPSE_LINGER || corpse.order < oldest + excess {
-            commands.entity(entity).try_despawn();
+        corpse.limp_for += time.delta_secs();
+        if corpse.limp_for < CORPSE_FREEZE {
+            continue;
+        }
+        corpse.frozen = true;
+        for &part in &biped.parts {
+            commands.entity(part).try_insert((RigidBodyDisabled, ColliderDisabled));
+            // Уцелевшие куски брони - отдельные коллайдеры на частях тела
+            for piece in children.get(part).into_iter().flatten() {
+                commands.entity(*piece).try_insert(ColliderDisabled);
+            }
         }
     }
 }

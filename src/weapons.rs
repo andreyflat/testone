@@ -5,14 +5,16 @@ use bevy_rapier3d::prelude::*;
 use dummies::DamageSystems;
 use crate::enemies::{ENEMY_GROUP, ENEMY_HEIGHT, ENEMY_RADIUS, Enemy, EnemyHits, PLAYER_GROUP};
 use crate::lights::raytraced;
-use crate::player::{Player, PlayerCamera};
+use crate::player::{Player, PlayerCamera, Velocity as PlayerVelocity};
 
-/// Выстрел идёт ниже центра игрока: стоя на полу, он попадает врагу в ноги.
-/// В прыжке выстрел поднимается вместе с игроком, до груди и головы.
+/// Ствол ниже центра игрока. Выстрел без врага под прицелом идёт горизонтально на этой
+/// высоте: с пола на уровне ног, в прыжке - выше.
 const MUZZLE_OFFSET_Y: f32 = -0.32;
 /// Близко к игроку, иначе пуля появляется уже за врагом, стоящим вплотную.
 const MUZZLE_DISTANCE: f32 = 0.4;
 const PLAYER_RADIUS: f32 = 0.3;
+/// За столько секунд модель игрока проходит примерно две трети поворота к прицелу.
+const TURN_LAG: f32 = 0.06;
 
 const GAUNTLET_DAMAGE: f32 = 50.0;
 /// Расстояние от поверхности игрока до поверхности врага, на котором достаёт удар.
@@ -21,15 +23,17 @@ const GAUNTLET_REACH: f32 = 0.6;
 const GAUNTLET_CONE_COS: f32 = 0.5;
 
 const MACHINE_GUN_DAMAGE: f32 = 5.0;
-/// Сила толчка от пули, от 0 до 1. Пуля автомата только дёргает врага: с шага его сбивают
-/// удар перчаткой, рейлган и взрыв.
-const MACHINE_GUN_IMPACT: f32 = 0.15;
+/// Сила толчка от пули, от 0 до 1. Одна пуля автомата дёргает ту часть тела, в которую попала,
+/// а очередь из четырёх-пяти подряд сбивает врага с шага. Перчатка, рейлган и взрыв сбивают сразу.
+const MACHINE_GUN_IMPACT: f32 = 0.3;
 const BULLET_RADIUS: f32 = 0.15;
 const ROCKET_RADIUS: f32 = 0.2;
 const BULLET_SPEED: f32 = 50.0;
 const BULLET_LIFETIME: f32 = 2.0;
 
-const RAIL_DAMAGE: f32 = 100.0;
+const RAIL_DAMAGE: f32 = 80.0;
+/// Попадание рейлгана в голову убивает сразу: это вдвое больше здоровья врага.
+const RAIL_HEADSHOT_DAMAGE: f32 = 200.0;
 const RAIL_RANGE: f32 = 80.0;
 const RAIL_TRAIL_DURATION: f32 = 0.5;
 const RAIL_TRAIL_RADIUS: f32 = 0.03;
@@ -39,6 +43,13 @@ const ROCKET_DAMAGE: f32 = 100.0;
 const ROCKET_SPEED: f32 = 10.0;
 const ROCKET_SPLASH_RADIUS: f32 = 1.5;
 const ROCKET_LIFETIME: f32 = 6.0;
+/// Рокетджамп: скорость, которую взрыв вплотную придаёт игроку. Урона игроку взрыв не наносит.
+/// Для сравнения, обычный прыжок - 6.75 м/с.
+const ROCKET_JUMP_SPEED: f32 = 8.0;
+/// Взрыв толкает игрока на расстоянии до двух радиусов поражения, как и тела врагов.
+const ROCKET_JUMP_REACH: f32 = ROCKET_SPLASH_RADIUS * 2.0;
+/// Половина высоты цилиндрической части капсулы игрока.
+const PLAYER_HALF_HEIGHT: f32 = 0.5;
 
 pub struct WeaponsPlugin;
 impl Plugin for WeaponsPlugin {
@@ -100,9 +111,17 @@ pub struct Bullet {
     pub splash_radius: Option<f32>,
 }
 
-/// Первая поверхность или враг под прицелом: туда летит ракета.
+/// Что находится под прицелом.
 #[derive(Resource, Default)]
-pub struct AimPoint(pub Option<Vec3>);
+pub struct AimPoint {
+    /// Первая поверхность или враг под прицелом: туда летит ракета.
+    pub surface: Option<Vec3>,
+    /// Точка на теле живого врага под прицелом: туда летят пуля и луч рейлгана.
+    pub enemy: Option<Vec3>,
+    /// Горизонтальное направление от игрока к прицелу. Выстрел идёт по нему сразу,
+    /// а модель игрока доворачивается с небольшим отставанием.
+    pub forward: Option<Vec3>,
+}
 
 /// Общие меши и материалы снарядов и вспышек: для трассировки это намного дешевле.
 #[derive(Resource)]
@@ -199,19 +218,22 @@ fn select_weapon(
     }
 }
 
-/// Разворачивает игрока к прицелу и ищет цель для ракеты.
+/// Разворачивает игрока к прицелу и ищет, что под ним находится.
 ///
-/// Пули летят горизонтально на высоте ствола, поэтому игрок смотрит на точку, где луч
-/// из-под прицела пересекает плоскость ствола. Тогда пуля на экране проходит ровно под
-/// прицелом и на земле, и в прыжке, когда плоскость поднимается вместе с игроком.
+/// Прицел на враге: выстрел идёт от ствола прямо в ту точку тела, что видна под прицелом.
+/// Прицел на полу или стене: пули летят горизонтально на высоте ствола, и игрок смотрит
+/// на точку, где луч из-под прицела пересекает плоскость ствола. Тогда пуля на экране
+/// проходит ровно под прицелом и на земле, и в прыжке.
 fn aim_player(
+    time: Res<Time>,
     camera: Query<(&Camera, &GlobalTransform), With<PlayerCamera>>,
     windows: Query<&Window>,
     rapier: ReadRapierContext,
     mut player: Query<&mut Transform, With<Player>>,
+    groups: Query<&CollisionGroups>,
     mut aim: ResMut<AimPoint>,
 ) {
-    aim.0 = None;
+    *aim = AimPoint::default();
     let (Ok((camera, camera_transform)), Ok(window), Ok(mut player)) =
         (camera.single(), windows.single(), player.single_mut())
     else {
@@ -224,23 +246,35 @@ fn aim_player(
         return;
     };
 
-    let muzzle = player.translation + Vec3::Y * MUZZLE_OFFSET_Y;
-    if let Some(distance) = ray.intersect_plane(muzzle, InfinitePlane3d::new(Vec3::Y)) {
-        let direction = (ray.get_point(distance) - muzzle).with_y(0.0);
-        if direction.length_squared() > 1e-4 {
-            player.look_to(direction, Vec3::Y);
+    // Первое, во что упирается луч прицела, кроме самого игрока
+    if let Ok(rapier) = rapier.single() {
+        let filter = QueryFilter::new().exclude_sensors().groups(not_player());
+        let direction = *ray.direction;
+        if let Some((collider, toi)) = rapier.cast_ray(ray.origin, direction, 500.0, true, filter) {
+            let point = ray.origin + direction * toi;
+            aim.surface = Some(point);
+            let alive = groups.get(collider).is_ok_and(|groups| groups.memberships.contains(ENEMY_GROUP));
+            if alive {
+                aim.enemy = Some(point);
+            }
         }
     }
 
-    // Ракета: первое, во что упирается луч прицела, кроме самого игрока
-    let Ok(rapier) = rapier.single() else {
-        return;
-    };
-    let filter = QueryFilter::new().exclude_sensors().groups(not_player());
-    let direction = *ray.direction;
-    aim.0 = rapier
-        .cast_ray(ray.origin, direction, 500.0, true, filter)
-        .map(|(_, toi)| ray.origin + direction * toi);
+    let muzzle = player.translation + Vec3::Y * MUZZLE_OFFSET_Y;
+    let target = aim
+        .enemy
+        .or_else(|| ray.intersect_plane(muzzle, InfinitePlane3d::new(Vec3::Y)).map(|distance| ray.get_point(distance)));
+    if let Some(target) = target {
+        let direction = (target - muzzle).with_y(0.0);
+        if direction.length_squared() > 1e-4 {
+            aim.forward = direction.try_normalize();
+            // Модель доворачивается плавно: иначе она дёргается, когда прицел
+            // переходит с пола на врага и точка прицеливания прыгает
+            let facing = Transform::default().looking_to(direction, Vec3::Y).rotation;
+            let blend = 1.0 - (-time.delta_secs() / TURN_LAG).exp();
+            player.rotation = player.rotation.slerp(facing, blend);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -265,9 +299,14 @@ fn handle_shooting(
     }
     weapon.cooldown = weapon.kind.cooldown();
 
-    // Игрок повёрнут к курсору, стреляем горизонтально вперёд
-    let forward = player_transform.rotation * Vec3::NEG_Z;
+    // Игрок повёрнут к курсору. Пуля и луч идут в точку на враге под прицелом,
+    // а если под прицелом врага нет - горизонтально вперёд
+    let forward = aim.forward.unwrap_or(player_transform.rotation * Vec3::NEG_Z);
     let muzzle = player_transform.translation + Vec3::Y * MUZZLE_OFFSET_Y;
+    let shot = aim
+        .enemy
+        .and_then(|point| (point - muzzle).try_normalize())
+        .unwrap_or(forward);
 
     match weapon.kind {
         WeaponKind::Gauntlet => {
@@ -278,12 +317,12 @@ fn handle_shooting(
                 projectile(
                     assets.bullet_mesh.clone(),
                     assets.bullet_material.clone(),
-                    muzzle + forward * MUZZLE_DISTANCE,
+                    muzzle + shot * MUZZLE_DISTANCE,
                 ),
                 Bullet {
                     damage: MACHINE_GUN_DAMAGE,
                     lifetime: BULLET_LIFETIME,
-                    velocity: forward * BULLET_SPEED,
+                    velocity: shot * BULLET_SPEED,
                     radius: BULLET_RADIUS,
                     splash_radius: None,
                 },
@@ -294,13 +333,13 @@ fn handle_shooting(
             let Ok(rapier) = rapier.single() else {
                 return;
             };
-            rail_shot(&mut commands, &assets, &mut materials, &rapier, &mut hits, muzzle, forward);
+            rail_shot(&mut commands, &assets, &mut materials, &rapier, &mut hits, muzzle, shot);
         }
         WeaponKind::RocketLauncher => {
             let start = muzzle + forward * MUZZLE_DISTANCE;
             // Ракета летит по прямой к точке под прицелом, снижаясь к ней от ствола.
             // Враг на пути перехватит её раньше. Без точки под курсором - в пол в 10 м впереди.
-            let target = aim.0.unwrap_or(start.with_y(0.0) + forward * 10.0);
+            let target = aim.surface.unwrap_or(start.with_y(0.0) + forward * 10.0);
             let direction = (target - start).try_normalize().unwrap_or(forward);
             commands.spawn((
                 projectile(
@@ -344,6 +383,7 @@ fn fly_projectiles(
     rapier: ReadRapierContext,
     assets: Res<WeaponAssets>,
     mut bullets: Query<(Entity, &mut Bullet, &mut Transform)>,
+    mut player: Query<(&Transform, &mut PlayerVelocity), (With<Player>, Without<Bullet>)>,
     mut hits: EnemyHits,
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -381,11 +421,24 @@ fn fly_projectiles(
             // Ракета взрывается о любую поверхность и задевает всех врагов в радиусе
             spawn_flash(&mut commands, &assets, &mut materials, Flash::explosion(position, radius));
             hits.explode(position, radius, bullet.damage);
+            if let Ok((player, mut velocity)) = player.single_mut() {
+                velocity.0 += blast_push(position, player.translation);
+            }
         } else if let Some((body, part)) = hits.target(collider) {
             let point = position + direction * bullet.radius;
             hits.hit(body, part, point, direction, bullet.damage, MACHINE_GUN_IMPACT, Some(position.y));
         }
     }
+}
+
+/// Скорость, которую взрыв в точке `origin` придаёт игроку с центром в `player`.
+/// Толчок идёт от взрыва к центру игрока и слабеет с расстоянием до поверхности капсулы.
+fn blast_push(origin: Vec3, player: Vec3) -> Vec3 {
+    let offset = origin - player;
+    let nearest = player + Vec3::Y * offset.y.clamp(-PLAYER_HALF_HEIGHT, PLAYER_HALF_HEIGHT);
+    let distance = (origin.distance(nearest) - PLAYER_RADIUS).max(0.0);
+    let falloff = (1.0 - distance / ROCKET_JUMP_REACH).max(0.0);
+    (player - origin).try_normalize().unwrap_or(Vec3::Y) * ROCKET_JUMP_SPEED * falloff
 }
 
 /// Удар перчаткой: ближайший враг перед игроком в пределах досягаемости.
@@ -454,7 +507,8 @@ fn rail_shot(
     });
     for (body, part, distance) in struck {
         let point = muzzle + forward * distance;
-        hits.hit(body, part, point, forward, RAIL_DAMAGE, 1.0, Some(point.y));
+        let damage = if hits.is_head(part) { RAIL_HEADSHOT_DAMAGE } else { RAIL_DAMAGE };
+        hits.hit(body, part, point, forward, damage, 1.0, Some(point.y));
     }
 
     let emissive = LinearRgba::rgb(0.3, 0.8, 1.0) * 20_000.0;

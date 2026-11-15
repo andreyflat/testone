@@ -96,7 +96,7 @@ const FLINCH_SPRING: (f32, f32) = (250.0, 26.0);
 const MIN_FLINCH_CONTROL: f32 = 0.2;
 /// How fast a hit at full impact sets the joint holding the part hit turning, in radians per
 /// second per metre of leverage the shot has about it.
-const FLINCH_KICK: f32 = 18.0;
+const FLINCH_KICK: f32 = 70.0;
 /// Each joint further up the body from the part hit is kicked this fraction as hard as the one
 /// below it.
 const FLINCH_FALLOFF: f32 = 0.4;
