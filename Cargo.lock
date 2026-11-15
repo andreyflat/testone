@@ -2148,6 +2148,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "biped"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_rapier3d",
+ "fastrand",
+ "game_core",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2757,6 +2767,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "dummies"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_rapier3d",
+ "biped",
+ "fastrand",
+ "game_core",
+]
+
+[[package]]
 name = "ecolor"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3138,6 +3159,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94"
 dependencies = [
  "thread_local",
+]
+
+[[package]]
+name = "game_core"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_rapier3d",
 ]
 
 [[package]]
@@ -5862,6 +5891,9 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "bevy_rapier3d",
+ "biped",
+ "dummies",
+ "game_core",
 ]
 
 [[package]]

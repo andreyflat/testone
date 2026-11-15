@@ -2,7 +2,7 @@
 use bevy::prelude::*;
 use bevy::input::keyboard::KeyCode;
 use bevy_rapier3d::prelude::*;
-use crate::enemies::{ENEMY_GROUP, Health, PLAYER_GROUP, PLAYER_MAX_HEALTH};
+use crate::enemies::{ENEMY_GROUP, Health, PLAYER_GROUP, PLAYER_MAX_HEALTH, RAGDOLL_GROUP};
 use crate::world::ARENA_HALF_SIZE;
 
 #[derive(Resource)]
@@ -38,8 +38,8 @@ impl Default for GameSettings {
     }
 }
 
-#[derive(Component)]
-pub struct Player;
+/// Маркер игрока общий с телами врагов: умирающий враг может побрести к игроку.
+pub use game_core::Player;
 
 #[derive(Component, Default, Debug)]
 pub struct Velocity(pub Vec3);
@@ -160,7 +160,8 @@ pub fn spawn_player(
         })
         .id();
 
-    let groups = CollisionGroups::new(PLAYER_GROUP, Group::ALL ^ ENEMY_GROUP);
+    // Ни враги, ни их упавшие тела игроку не преграда
+    let groups = CollisionGroups::new(PLAYER_GROUP, Group::ALL ^ (ENEMY_GROUP | RAGDOLL_GROUP));
     commands.entity(player)
         .insert(Health::new(PLAYER_MAX_HEALTH))
         .insert(groups)

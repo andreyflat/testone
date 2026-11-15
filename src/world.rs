@@ -13,6 +13,8 @@ impl Plugin for WorldPlugin {
 #[derive(Component)]
 pub struct Ground;
 
+const FLOOR_HALF_THICKNESS: f32 = 0.5;
+
 fn spawn_floor(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -35,12 +37,15 @@ fn spawn_floor(
     // Добавляем физическую коллизию для земли
     commands.entity(entity).insert((
         RigidBody::Fixed,
-        // Коллайдер пола - тонкий прямоугольник
-        Collider::cuboid(25.0, 0.1, 25.0), // width, height/2, depth
-        Friction {
-            coefficient: 0.0, // Убираем трение для Quake-физики
-            combine_rule: CoefficientCombineRule::Min,
-        },
+        // Верх коллайдера совпадает с мешем пола, иначе тела врагов висели бы над ним.
+        // Плита толстая, чтобы упавшие тела не проваливались сквозь неё.
+        Collider::compound(vec![(
+            Vec3::new(0.0, -FLOOR_HALF_THICKNESS, 0.0),
+            Quat::IDENTITY,
+            Collider::cuboid(25.0, FLOOR_HALF_THICKNESS, 25.0),
+        )]),
+        // Трение нужно упавшим телам. Игрок движется своим кодом и от него не зависит
+        Friction::coefficient(0.8),
         Restitution {
             coefficient: 0.0, // Никакого отскока
             combine_rule: CoefficientCombineRule::Min,
@@ -132,6 +137,40 @@ pub fn is_blocked(position: Vec3, margin: f32) -> bool {
             (position.x - b.center.x).abs() < b.half.x + margin
                 && (position.z - b.center.z).abs() < b.half.z + margin
         })
+}
+
+/// Выталкивает круг радиуса `radius` из блоков уровня и возвращает его внутрь арены.
+/// Высота не учитывается: так ходят враги, которых анимация ведёт без физики.
+pub fn push_out(position: Vec3, radius: f32) -> Vec3 {
+    let mut position = position;
+    for b in LEVEL {
+        let local = Vec2::new(position.x - b.center.x, position.z - b.center.z);
+        let half = Vec2::new(b.half.x, b.half.z);
+        let nearest = local.clamp(-half, half);
+        let away = local - nearest;
+        let distance = away.length();
+        if distance >= radius {
+            continue;
+        }
+        let push = if distance > 1e-4 {
+            // Снаружи блока: от ближайшей точки его края
+            away / distance * (radius - distance)
+        } else {
+            // Внутри блока: к ближайшей грани и ещё на радиус
+            let depth = half - local.abs();
+            if depth.x < depth.y {
+                Vec2::new((depth.x + radius).copysign(local.x), 0.0)
+            } else {
+                Vec2::new(0.0, (depth.y + radius).copysign(local.y))
+            }
+        };
+        position.x += push.x;
+        position.z += push.y;
+    }
+    let limit = ARENA_HALF_SIZE - radius;
+    position.x = position.x.clamp(-limit, limit);
+    position.z = position.z.clamp(-limit, limit);
+    position
 }
 
 fn spawn_level(
